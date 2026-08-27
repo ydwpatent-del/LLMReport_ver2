@@ -40,13 +40,17 @@ def main():
         supported_exts=settings.supported_extensions
     )
 
-    # 2. 초기 스캔 수행 (기존 미변환 파일 인제스트)
-    logger.info("🔍 Source 폴더 초기 동기화 스캔 실행 중...")
-    proc_cnt, skip_cnt = agent.scan_now()
-    logger.info(f"✅ 초기 스캔 완료: {proc_cnt}건 신규 변환 완료, {skip_cnt}건 기존 파일 유지")
-
-    # 3. 실시간 파일 감시 에이전트 백그라운드 시작
+    # 2. 실시간 파일 감시 에이전트 백그라운드 시작
     agent.start()
+
+    # 3. 초기 스캔을 백그라운드 스레드로 비동기 실행 (웹 서버가 즉시 기동되도록 보장)
+    def async_initial_scan():
+        logger.info("🔍 Source 폴더 초기 동기화 스캔 실행 중 (백그라운드)...")
+        proc_cnt, skip_cnt = agent.scan_now()
+        logger.info(f"✅ 초기 스캔 완료: {proc_cnt}건 신규 변환 완료, {skip_cnt}건 기존 파일 유지")
+
+    import threading
+    threading.Thread(target=async_initial_scan, daemon=True).start()
 
     # 4. FastAPI 앱 생성
     app = create_app(settings=settings, manifest_mgr=manifest_mgr, agent=agent)
