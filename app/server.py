@@ -81,10 +81,18 @@ def create_app(
         docs = manifest_mgr.get_all_documents()
         return sorted(docs, key=lambda d: d.ingested_at, reverse=True)
 
-    @app.get("/api/documents/{doc_id}", response_model=DocumentDetailResponse)
+    @app.get("/api/documents/{doc_id:path}", response_model=DocumentDetailResponse)
     async def get_document_detail(doc_id: str):
         """특정 문서의 메타데이터와 마크다운 본문을 반환한다."""
-        doc = manifest_mgr.get_document(doc_id)
+        import urllib.parse
+        clean_id = urllib.parse.unquote(doc_id)
+        doc = manifest_mgr.get_document(clean_id) or manifest_mgr.get_document(doc_id)
+        if not doc:
+            # 부분 일치 검색 시도 (안전망)
+            for d in manifest_mgr.get_all_documents():
+                if d.id == clean_id or d.id == doc_id or d.title == clean_id:
+                    doc = d
+                    break
         if not doc:
             raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
 

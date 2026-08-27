@@ -41,6 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let documents = [];
   let currentDoc = null;
   let isRawView = false;
+  let isInitialLoad = true;
 
   // 1. 토스트 알림 함수
   function showToast(message, type = 'info') {
@@ -105,14 +106,20 @@ document.addEventListener('DOMContentLoaded', () => {
       renderDocumentList();
 
       if (selectId) {
-        loadDocument(selectId);
+        await loadDocument(selectId);
       } else if (currentDoc) {
         const stillExists = documents.find(d => d.id === currentDoc.id);
-        if (stillExists) loadDocument(currentDoc.id);
+        if (stillExists) {
+          // 메타데이터만 갱신하거나 내용 유지
+          currentDoc = stillExists;
+        }
+      } else if (isInitialLoad && documents.length > 0) {
+        // 첫 진입 시 첫 번째 문서 자동 로드
+        isInitialLoad = false;
+        await loadDocument(documents[0].id);
       }
     } catch (err) {
       console.error('문서 목록 로드 오류:', err);
-      showToast('문서 목록을 불러오지 못했습니다.', 'error');
     }
   }
 
@@ -185,8 +192,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // 5. 문서 상세 및 마크다운 본문 로드
   async function loadDocument(docId) {
     try {
-      const res = await fetch(`/api/documents/${docId}`);
-      if (!res.ok) throw new Error('문서 상세 조회 실패');
+      console.log('[Wiki] Loading document:', docId);
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`);
+      if (!res.ok) throw new Error(`문서 상세 조회 실패 (${res.status})`);
       currentDoc = await res.json();
 
       if (emptyView) emptyView.classList.add('hidden');
@@ -239,7 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // 마크다운 렌더링 실행
-      renderMarkdownContent(currentDoc.content || '');
+      await renderMarkdownContent(currentDoc.content || '');
       renderDocumentList();
     } catch (err) {
       console.error('문서 로드 오류:', err);
@@ -247,17 +255,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 6. 안전한 마크다운 렌더링 및 인라인 이미지 처리 함수
-  function renderMarkdownContent(content) {
+  // 6. 안전하고 강력한 마크다운 렌더링 함수
+  async function renderMarkdownContent(content) {
     if (rawContent) rawContent.textContent = content;
 
     try {
-      // Marked 기본 파싱
       let html = '';
-      if (window.marked && typeof window.marked.parse === 'function') {
-        html = window.marked.parse(content);
-      } else {
-        html = `<pre class="whitespace-pre-wrap">${content}</pre>`;
+
+      // 1. Marked.js 파싱 시도
+      if (window.marked) {
+        if (typeof window.marked.parse === 'function') {
+          html = await Promise.resolve(window.marked.parse(content));
+        } else if (typeof window.marked === 'function') {
+          html = await Promise.resolve(window.marked(content));
+        }
+      }
+
+      // 2. 파싱 결과가 비어있거나 객체인 경우 안전 폴백
+      if (!html || typeof html !== 'string' || html.trim() === '') {
+        // 간단한 기본 마크다운 파서 폴백
+        html = content
+          .replace(/^### (.*$)/gim, '<h3 class="text-base font-bold text-slate-200 mt-6 mb-2">$1</h3>')
+          .replace(/^## (.*$)/gim, '<h2 class="text-lg font-bold text-white mt-8 mb-3 pb-2 border-b border-slate-700">$1</h2>')
+          .replace(/^# (.*$)/gim, '<h1 class="text-xl font-extrabold text-white mt-4 mb-4">$1</h1>')
+          .replace(/^\> (.*$)/gim, '<blockquote class="border-l-4 border-brand-500 pl-4 py-1.5 my-3 bg-slate-800/40 rounded-r-lg text-slate-300">$1</blockquote>')
+          .replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>')
+          .replace(/\*(.*?)\*/gim, '<em>$1</em>')
+          .replace(/!\[(.*?)\]\((.*?)\)/gim, '<img src="$2" alt="$1">')
+          .replace(/\n\n/gim, '<br><br>');
       }
 
       if (renderedContent) {
@@ -273,7 +298,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:') && !src.startsWith('/api/assets/')) {
             const filename = src.replace(/^(\.\/|\.\.\/|images\/|\\images\\)/, '').split('/').pop().split('\\').pop();
             if (currentDoc && currentDoc.id) {
-              src = `/api/assets/${currentDoc.id}/${filename}`;
+              src = `/api/assets/${encodeURIComponent(currentDoc.id)}/${encodeURIComponent(filename)}`;
               img.setAttribute('src', src);
             }
           }
@@ -282,12 +307,11 @@ document.addEventListener('DOMContentLoaded', () => {
           img.className = 'max-h-[650px] max-w-full object-contain rounded-lg shadow-lg cursor-zoom-in hover:scale-[1.01] transition border border-slate-700';
           img.loading = 'lazy';
 
-          // 3. figure & figcaption 감싸기 (이미 감싸져 있지 않은 경우)
+          // 3. figure & figcaption 감싸기
           if (img.parentElement && img.parentElement.tagName !== 'FIGURE') {
             const figure = document.createElement('figure');
             figure.className = 'my-6 p-3 bg-slate-800/50 rounded-2xl border border-slate-700/70 max-w-full flex flex-col items-center shadow-inner';
             
-            // 기존 img를 figure 안으로 이동
             img.parentElement.insertBefore(figure, img);
             figure.appendChild(img);
 
@@ -299,7 +323,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
           }
 
-          // 4. 클릭 시 고해상도 라이트박스 줌
+          // 4. 클릭 시 라이트박스 모달 줌
           img.addEventListener('click', () => {
             if (modalImage && imageModal) {
               modalImage.src = img.src;
@@ -330,15 +354,13 @@ document.addEventListener('DOMContentLoaded', () => {
               ],
               throwOnError: false
             });
-          } catch (e) {
-            console.warn('KaTeX 수식 렌더링 경고:', e);
-          }
+          } catch (e) {}
         }
       }
     } catch (err) {
       console.error('마크다운 렌더링 에러:', err);
       if (renderedContent) {
-        renderedContent.innerHTML = `<div class="p-4 bg-rose-900/40 border border-rose-700 rounded-lg text-xs text-rose-200 mb-4">렌더링 중 오류가 발생했습니다. 원문으로 표시합니다.</div><pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${content}</pre>`;
+        renderedContent.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${content}</pre>`;
       }
     }
 
