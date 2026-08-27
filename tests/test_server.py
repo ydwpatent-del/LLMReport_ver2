@@ -74,3 +74,9 @@ def test_api_endpoints(tmp_path: Path):
     res_scan = client.post("/api/scan")
     assert res_scan.status_code == 200
     assert "processed_count" in res_scan.json()
+
+    # 6. 루트 HTML 및 정적 파일 라우팅 검증
+    res_root = client.get("/")
+    assert res_root.status_code == 200
+    assert "LLM Wiki" in res_root.text
+    assert "docListContainer" in res_root.text

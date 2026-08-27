@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko" class="h-full bg-slate-900 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Wiki 지식 인제스트 대시보드</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Font Awesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Marked.js (Markdown Renderer) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Highlight.js (Code Highlighting) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- KaTeX (Math Rendering) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="h-full flex flex-col antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- 상단 네비게이션 헤더 -->
+  <header class="bg-slate-800/90 backdrop-blur border-b border-slate-700 sticky top-0 z-30 px-4 py-3 shrink-0">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <button id="mobileMenuBtn" class="lg:hidden p-2 rounded-lg hover:bg-slate-700 text-slate-300 focus:outline-none" aria-label="메뉴 열기">
+          <i class="fa-solid fa-bars text-lg"></i>
+        </button>
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-brand-600 to-indigo-400 flex items-center justify-center shadow-lg shadow-brand-500/30">
+            <i class="fa-solid fa-book-bookmark text-white text-sm"></i>
+          </div>
+          <div>
+            <h1 class="text-base font-bold text-white tracking-tight flex items-center gap-2">
+              LLM Wiki Ingest
+              <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> 실시간 감시 중
+              </span>
+            </h1>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="scanBtn" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5 shadow-sm active:scale-95">
+          <i class="fa-solid fa-arrows-rotate" id="scanIcon"></i>
+          <span class="hidden sm:inline">Source 동기화</span>
+        </button>
+
+        <label for="fileUploadInput" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition flex items-center gap-1.5 shadow-md shadow-brand-600/30 cursor-pointer active:scale-95">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+          <span class="hidden sm:inline">문서 투입</span>
+        </label>
+        <input type="file" id="fileUploadInput" class="hidden" multiple accept=".hwp,.hwpx,.pdf,.docx,.xlsx,.md,.txt">
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 컨텐츠 영역 -->
+  <div class="flex-1 flex overflow-hidden max-w-7xl w-full mx-auto relative">
+    
+    <!-- 모바일 드로어 오버레이 -->
+    <div id="mobileOverlay" class="fixed inset-0 bg-black/60 z-20 hidden lg:hidden transition-opacity"></div>
+
+    <!-- 좌측 문서 탐색기 사이드바 -->
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-20 w-80 bg-slate-800 border-r border-slate-700 flex flex-col transform -translate-x-full transition-transform duration-200 ease-in-out lg:relative lg:translate-x-0 shrink-0">
+      
+      <!-- 사이드바 상단: 검색 & 통계 -->
+      <div class="p-3 border-b border-slate-700/80 space-y-3">
+        <div class="relative">
+          <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
+          <input type="text" id="searchInput" placeholder="문서 검색 (제목, 파일명)..." class="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg bg-slate-900/80 border border-slate-700 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+        </div>
+        
+        <div class="flex items-center justify-between text-xs text-slate-400 px-1">
+          <span id="docCountText">총 0개 문서</span>
+          <span class="text-[11px] bg-slate-700/50 px-2 py-0.5 rounded text-slate-300">WikiDB 저장소</span>
+        </div>
+      </div>
+
+      <!-- 문서 목록 -->
+      <div id="docListContainer" class="flex-1 overflow-y-auto p-2 space-y-1.5">
+        <!-- JS로 동적 생성 -->
+        <div class="text-center py-10 text-slate-500 text-xs">
+          <i class="fa-solid fa-folder-open text-2xl mb-2 opacity-40"></i>
+          <p>등록된 문서가 없습니다.</p>
+          <p class="text-[11px] text-slate-600 mt-1">Source 폴더에 문서를 투입하세요.</p>
+        </div>
+      </div>
+
+      <!-- 사이드바 하단 정보 -->
+      <div class="p-3 border-t border-slate-700/80 text-[11px] text-slate-400 flex items-center justify-between bg-slate-800/50">
+        <span class="truncate" title="WikiDB/docs"><i class="fa-solid fa-database mr-1 text-slate-500"></i>WikiDB</span>
+        <button id="refreshListBtn" class="hover:text-brand-400 transition" title="목록 새로고침">
+          <i class="fa-solid fa-rotate-right"></i>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 중앙 본문 마크다운 뷰어 영역 -->
+    <main class="flex-1 flex flex-col overflow-hidden bg-slate-900 min-w-0">
+      
+      <!-- 빈 상태 웰컴 화면 -->
+      <div id="emptyView" class="flex-1 flex flex-col items-center justify-center p-6 text-center">
+        <div class="w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center mb-4 text-slate-400 shadow-xl">
+          <i class="fa-solid fa-file-waveform text-2xl"></i>
+        </div>
+        <h2 class="text-lg font-bold text-slate-200 mb-1">문서를 선택하여 완본을 확인하세요</h2>
+        <p class="text-xs text-slate-400 max-w-sm mb-6 leading-relaxed">
+          좌측 목록에서 문서를 클릭하면 kordoc으로 100% 무삭제 복원된 텍스트, 표, 수식, 고화질 추출 이미지를 열람할 수 있습니다.
+        </p>
+        
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-md w-full text-left">
+          <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+            <div class="text-brand-400 text-xs font-semibold mb-1 flex items-center gap-1.5">
+              <i class="fa-solid fa-shield-halved"></i> 100% 무삭제 복원
+            </div>
+            <p class="text-[11px] text-slate-400">단 한 줄의 문장이나 재무제표 표 수치도 누락 없이 전수 추출됩니다.</p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+            <div class="text-emerald-400 text-xs font-semibold mb-1 flex items-center gap-1.5">
+              <i class="fa-solid fa-image"></i> 인라인 도표 & 수식
+            </div>
+            <p class="text-[11px] text-slate-400">문서 내 도표와 차트 이미지가 본문 문맥 바로 아래에 배치됩니다.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 문서 상세 뷰어 -->
+      <div id="documentViewer" class="flex-1 flex flex-col overflow-hidden hidden">
+        
+        <!-- 문서 헤더 메타데이터 바 -->
+        <div class="bg-slate-800/80 border-b border-slate-700 p-4 shrink-0">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <span id="docFormatBadge" class="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 border border-brand-500/30">
+                  HWPX
+                </span>
+                <span id="docStatusBadge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  완료됨
+                </span>
+                <span id="docDateText" class="text-xs text-slate-400"></span>
+              </div>
+              <h2 id="docTitleHeading" class="text-base sm:text-lg font-bold text-white truncate"></h2>
+            </div>
+
+            <div class="flex items-center gap-2 self-end sm:self-auto">
+              <button id="copyMdBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5" title="마크다운 원문 복사">
+                <i class="fa-regular fa-copy"></i>
+                <span class="hidden md:inline">MD 복사</span>
+              </button>
+              <button id="toggleRawBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5" title="렌더링/원문 토글">
+                <i class="fa-solid fa-code"></i>
+                <span class="hidden md:inline">원문 보기</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 메타데이터 상세 토글 섹션 -->
+          <div class="mt-3 pt-2.5 border-t border-slate-700/60 text-[11px] text-slate-400 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+            <div><strong class="text-slate-300">원본 파일:</strong> <span id="metaOrigName" class="font-mono text-slate-300"></span></div>
+            <div><strong class="text-slate-300">파일 크기:</strong> <span id="metaFileSize"></span></div>
+            <div class="truncate"><strong class="text-slate-300">해시:</strong> <span id="metaHash" class="font-mono text-slate-400" title=""></span></div>
+          </div>
+        </div>
+
+        <!-- 본문 마크다운 스크롤 컨테이너 -->
+        <div class="flex-1 flex overflow-hidden">
+          
+          <!-- 마크다운 렌더링 뷰 -->
+          <div id="renderedContent" class="flex-1 overflow-y-auto p-4 sm:p-8 markdown-body">
+            <!-- 렌더링된 마크다운 HTML -->
+          </div>
+
+          <!-- 원문 코드 뷰 (기본 hidden) -->
+          <div id="rawContent" class="flex-1 overflow-y-auto p-4 sm:p-6 hidden bg-slate-950 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed selection:bg-brand-600">
+            <!-- 순수 마크다운 텍스트 -->
+          </div>
+
+          <!-- 우측 목차 네비게이션 (PC 화면) -->
+          <div id="tocSidebar" class="w-56 border-l border-slate-700/80 p-4 overflow-y-auto hidden xl:block shrink-0 bg-slate-800/30">
+            <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+              <i class="fa-solid fa-list-ul text-brand-400"></i> 목차 (TOC)
+            </h3>
+            <nav id="tocContainer" class="space-y-1.5 text-xs text-slate-400">
+              <!-- JS로 헤딩 링크 동적 생성 -->
+            </nav>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 이미지 라이트박스 팝업 모달 -->
+  <div id="imageModal" class="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <button id="closeModalBtn" class="absolute top-4 right-4 text-white text-2xl hover:text-brand-400 transition p-2">
+      <i class="fa-solid fa-xmark"></i>
+    </button>
+    <div class="max-w-5xl max-h-[90vh] flex flex-col items-center">
+      <img id="modalImage" src="" alt="확대 이미지" class="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl border border-slate-700">
+      <p id="modalCaption" class="text-xs text-slate-300 mt-3 text-center"></p>
+    </div>
+  </div>
+
+  <!-- 토스트 알림 컨테이너 -->
+  <div id="toastContainer" class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none"></div>
+
+  <!-- 메인 스크립트 -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
