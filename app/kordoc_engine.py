@@ -10,17 +10,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from app.ai_refiner import AIRefiner
+
 logger = logging.getLogger("KordocEngine")
 
 # 지원 이미지 확장자
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp", ".gif", ".tiff"}
 
 class KordocEngine:
-    """kordoc CLI 기반 문서 파싱 및 이미지 인라인 추출 엔진."""
+    """kordoc CLI 기반 문서 파싱 및 AI 위키 지식 정돈 엔진."""
 
-    def __init__(self, docs_dir: Path, assets_dir: Path):
+    def __init__(self, docs_dir: Path, assets_dir: Path, refiner: Optional[AIRefiner] = None):
         self.docs_dir = docs_dir
         self.assets_dir = assets_dir
+        self.refiner = refiner or AIRefiner()
         self.docs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,10 +178,15 @@ class KordocEngine:
                 raw_content, doc_id, doc_asset_dir, search_dirs
             )
 
-            header = self._generate_metadata_header(title, source_path.name, file_hash, ext)
-            final_content = header + adjusted_md
-            target_md_path.write_text(final_content, encoding="utf-8")
-            return target_md_path, extracted_images, title
+            # AI 위키 지식 리파이닝 적용
+            final_md, meta = self.refiner.refine_text(
+                raw_md=adjusted_md,
+                doc_id=doc_id,
+                original_filename=source_path.name,
+                file_hash=file_hash
+            )
+            target_md_path.write_text(final_md, encoding="utf-8")
+            return target_md_path, extracted_images, meta["title"]
 
         # 2. HWP, HWPX, PDF, DOCX, XLSX 등 복합 문서는 kordoc CLI 호출
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,11 +228,16 @@ class KordocEngine:
                 raw_md, doc_id, doc_asset_dir, search_dirs
             )
 
-            header = self._generate_metadata_header(title, source_path.name, file_hash, ext)
-            final_content = header + adjusted_md
-            target_md_path.write_text(final_content, encoding="utf-8")
+            # AI 위키 지식 리파이닝 적용
+            final_md, meta = self.refiner.refine_text(
+                raw_md=adjusted_md,
+                doc_id=doc_id,
+                original_filename=source_path.name,
+                file_hash=file_hash
+            )
+            target_md_path.write_text(final_md, encoding="utf-8")
 
             # kordoc lint 자가 검증 실행
             self._run_kordoc_lint(target_md_path)
 
-        return target_md_path, extracted_images, title
+        return target_md_path, extracted_images, meta["title"]
