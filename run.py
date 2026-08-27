@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.manifest import ManifestManager
-from app.kordoc_engine import KordocEngine
+from app.kordoc_wiki_agent import KordocWikiAgent
 from app.ingest_agent import IngestAgent
 from app.server import create_app
 
@@ -25,14 +25,14 @@ def main():
     """시스템 초기화 및 서버/에이전트 통합 기동 함수."""
     settings = get_settings()
     logger.info("=" * 60)
-    logger.info("🚀 LLM Wiki 지식 인제스트 시스템 기동 중...")
+    logger.info("🚀 kordoc-wiki-ingest 기반 LLM 지능형 인제스트 시스템 기동 중...")
     logger.info(f"📂 원본 문서 투입 폴더 (Source): {settings.source_dir.resolve()}")
     logger.info(f"📚 위키 DB 저장 폴더 (WikiDB):  {settings.wiki_db_dir.resolve()}")
     logger.info("=" * 60)
 
-    # 1. 핵심 모듈 초기화
+    # 1. kordoc-wiki-ingest 전용 에이전트 및 매니페스트 초기화
     manifest_mgr = ManifestManager(settings.manifest_path)
-    engine = KordocEngine(docs_dir=settings.docs_dir, assets_dir=settings.assets_dir)
+    engine = KordocWikiAgent(docs_dir=settings.docs_dir, assets_dir=settings.assets_dir)
     agent = IngestAgent(
         source_dir=settings.source_dir,
         manifest_mgr=manifest_mgr,

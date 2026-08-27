@@ -11,7 +11,7 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from app.hasher import calculate_file_hash
 from app.manifest import ManifestManager, DocumentEntry
-from app.kordoc_engine import KordocEngine
+from app.kordoc_wiki_agent import KordocWikiAgent
 
 logger = logging.getLogger("IngestAgent")
 
@@ -77,9 +77,13 @@ class IngestAgent:
         doc_id = sanitize_doc_id(file_path.name)
         stat = file_path.stat()
 
-        logger.info(f"[시작] 신규 문서 인제스트 시작: {file_path.name} (ID: {doc_id})")
+        logger.info(f"[시작] kordoc-wiki-ingest 에이전트 가동: {file_path.name} (ID: {doc_id})")
         try:
-            target_md, images, title = self.engine.convert(file_path, doc_id, file_hash)
+            if hasattr(self.engine, "execute_ingest"):
+                target_md, images, title = self.engine.execute_ingest(file_path, doc_id, file_hash)
+            else:
+                target_md, images, title = self.engine.convert(file_path, doc_id, file_hash)
+
             entry = DocumentEntry(
                 id=doc_id,
                 original_filename=file_path.name,
@@ -93,7 +97,7 @@ class IngestAgent:
                 title=title
             )
             self.manifest_mgr.add_or_update_document(entry)
-            logger.info(f"[성공] 마크다운 변환 완료 및 WikiDB 등록: {target_md.name}")
+            logger.info(f"[성공] kordoc-wiki-ingest 완본 생성 및 WikiDB 등록: {target_md.name}")
             return True
         except Exception as e:
             logger.error(f"[오류] 문서 변환 실패 {file_path.name}: {e}")
