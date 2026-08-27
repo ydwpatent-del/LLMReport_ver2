@@ -20,38 +20,57 @@ logger = logging.getLogger("KordocWikiAgent")
 # 지원 이미지 확장자
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp", ".gif", ".tiff"}
 
-# kordoc-wiki-ingest 스킬 표준 시스템 지침
-KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/HWPX), 금융/기업 전문 리서치 보고서(PDF), 오피스 문서(DOCX/XLSX)를 
-LLM Wiki 및 RAG 지식 그래프의 Ground Truth 원천 자료로 변환하는 'kordoc-wiki-ingest' 전문 인제스트 에이전트입니다.
+# 지원 이미지 MIME 타입 매핑
+MIME_MAP = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+}
 
-반드시 다음 [5대 핵심 불변 원칙]을 100% 엄격하게 준수하여 마크다운 문서를 작성해야 합니다.
+# kordoc-wiki-ingest 스킬 표준 시스템 지침 (스킬 원문 Red Flags 전문 포함)
+KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/HWPX), 금융/기업 전문 리서치 보고서(PDF), 오피스 문서(DOCX/XLSX)를 LLM Wiki 및 RAG 지식 그래프의 Ground Truth 원천 자료로 변환하는 kordoc-wiki-ingest 전문 인제스트 에이전트입니다.
 
-1. Zero Information Loss (무삭제·무축약 원칙):
-   - 요약, 문장 생략, "등...", "~외 생략", "...(중략)..." 처리를 절대 금지합니다.
-   - 각주, 데이터 출처, 세부 비율, 시계열 통계, 재무제표(포괄손익계산서/재무상태표/현금흐름표/경영지표 등)의 모든 행/열을 단 하나도 생략하지 않고 100% 전수 복원하십시오.
+반드시 다음 5대 핵심 불변 원칙을 100% 엄격하게 준수하여 마크다운 문서를 작성해야 합니다.
 
-2. Visual Context Inlining & Multimodal Dual-Mode (시각 자료 인라인 및 이중 표기):
-   - 본문에 언급되는 모든 도표, 차트, 다이어그램, 사진 이미지는 문서 끝에 모으지 말고, 해당 설명이 위치한 본문 문맥 바로 아래에 다음 형식으로 인라인 삽입하십시오:
-     ![도표 X: 도표 제목](/api/assets/<DOC_ID>/<IMAGE_FILENAME>)
-     *(자료: 기관명/출처, 단위: 억원/%, 범례: A/B/C)*
-   - 막대/꺾은선/원형 차트는 시각적 인라인 이미지와 함께, 차트 내부의 원본 수치 데이터를 마크다운 표(| 구분 | 1Q | 2Q |)로 반드시 100% 병기하십시오 (Multimodal Dual-Mode).
+원칙1. Zero Information Loss:
+요약, 문장 생략, 등..., ~외 생략, ...(중략)... 처리를 절대 금지합니다.
+각주, 데이터 출처, 세부 비율, 시계열 통계, 재무제표(포괄손익계산서/재무상태표/현금흐름표/경영지표 등)의 모든 행/열을 단 하나도 생략하지 않고 100% 전수 복원하십시오.
 
-3. Wiki Chain-Ready & 메타데이터 주입:
-   - 문서 최상단에 다음 형식의 표준 메타데이터 헤더를 반드시 작성하십시오:
-     # [문서 정식 명칭]
-     > - **원본 파일명**: `<ORIGINAL_FILENAME>`
-     > - **발행기관**: 기관명 / 부서명
-     > - **발행일자**: YYYY년 MM월 DD일
-     > - **문서분류**: 리서치 보고서 / 정책 공문 / 기술 백서
-     > - **핵심 엔티티**: #기업명 #기술명 #정책명 #규격표준
-     > - **원본형식**: `<EXT>` (100% 무삭제 전수 인제스트)
-     > - **인제스트 일시**: `<NOW_TIME>`
-     > - **무결성 해시 (SHA-256)**: `<FILE_HASH>`
-     > - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)
-     ---
+원칙2. Visual Context Inlining & Multimodal Dual-Mode:
+첨부된 이미지(도표, 차트, 다이어그램, 사진)는 문서 끝에 모으지 말고, 해당 설명이 위치한 본문 문맥 바로 아래에 다음 형식으로 인라인 삽입하십시오:
+  ![도표 X: 도표 제목](/api/assets/<DOC_ID>/<IMAGE_FILENAME>)
+  *(자료: 기관명/출처, 단위: 억원/%, 범례: A/B/C)*
+막대/꺾은선/원형 차트는 인라인 이미지와 함께, 차트 내부의 원본 수치 데이터를 마크다운 표로 반드시 100% 병기하십시오 (Multimodal Dual-Mode).
+첨부된 이미지를 직접 보고 내부 수치, 범례, 단위, 색상 구분을 정확히 읽어내어 수치 표를 구성하십시오.
 
-4. 엄격한 헤딩 위계:
-   - 문서의 목차와 섹션 구조에 맞추어 `#`, `##`, `###`, `####` 헤딩 위계를 엄격하게 적용하십시오.
+원칙3. Wiki Chain-Ready & 메타데이터 주입:
+문서 최상단에 다음 형식의 표준 메타데이터 헤더를 반드시 작성하십시오:
+  # [문서 정식 명칭]
+  > - **원본 파일명**: `<ORIGINAL_FILENAME>`
+  > - **발행기관**: 기관명 / 부서명
+  > - **발행일자**: YYYY년 MM월 DD일
+  > - **문서분류**: 리서치 보고서 / 정책 공문 / 기술 백서
+  > - **핵심 엔티티**: #기업명 #기술명 #정책명
+  > - **원본형식**: `<EXT>` (100% 무삭제 전수 인제스트)
+  > - **인제스트 일시**: `<NOW_TIME>`
+  > - **무결성 해시 (SHA-256)**: `<FILE_HASH>`
+  > - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)
+  ---
+
+원칙4. 엄격한 헤딩 위계:
+문서의 목차와 섹션 구조에 맞추어 #, ##, ###, #### 헤딩 위계를 엄격하게 적용하십시오.
+전체 목차(Table of Contents)를 구축하여 각 섹션 내부 앵커 링크를 연결하십시오.
+
+원칙5. Red Flag - 다음 상황은 즉각 수정하십시오:
+- 본문에 ~등, ~외 생략, ...(중략)... 표현이 존재하는 경우
+- 재무제표나 시계열 표의 중간 행들이 생략된 경우
+- 이미지가 본문 위치가 아닌 문서 맨 끝에 몰려 있는 경우
+- 차트 이미지는 삽입되었으나 차트 원본 수치 테이블이 누락된 경우
+- 상단 메타데이터 블록이 누락된 경우
 
 오직 최종 완성된 마크다운 본문만을 출력하십시오 (별도의 인사말이나 사족 생략).
 """
@@ -104,7 +123,11 @@ class KordocWikiAgent:
         file_hash: str,
         images_info: list[dict]
     ) -> Optional[str]:
-        """Gemini LLM API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다."""
+        """Gemini 멀티모달 API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다.
+        
+        A안 (완전 멀티모달): 추출된 이미지를 바이트로 직접 Gemini에 전달.
+        LLM이 차트/도표 이미지를 직접 보고 수치·범례를 읽어 Dual-Mode 표를 생성한다.
+        """
         if not self.api_key:
             return None
 
@@ -116,39 +139,75 @@ class KordocWikiAgent:
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             ext = Path(original_filename).suffix.lstrip('.').upper() or "문서"
 
-            images_summary = "\n".join([
-                f"- 이미지 파일: {img['filename']} (웹 경로: /api/assets/{doc_id}/{img['filename']})"
-                for img in images_info
-            ]) if images_info else "(추출된 이미지 없음)"
+            # 로드 가능한 이미지 바이트 목록 준비 (path 키가 있고 실제 파일이 존재하는 것만)
+            image_parts = []
+            images_index_text = ""
+            valid_images = []
 
-            # 대형 문서인 경우 스마트 청크 분할
+            for img in images_info:
+                img_path = img.get("path")
+                if img_path and Path(img_path).exists():
+                    img_file = Path(img_path)
+                    mime = MIME_MAP.get(img_file.suffix.lower(), "image/png")
+                    try:
+                        img_bytes = img_file.read_bytes()
+                        image_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
+                        valid_images.append(img)
+                    except Exception as e:
+                        logger.warning(f"이미지 로드 실패 ({img_file.name}): {e}")
+
+            # 이미지 목록 인덱스 텍스트 생성 (LLM이 파일명과 웹 경로를 알 수 있도록)
+            if valid_images:
+                lines = [f"[첨부 이미지 {i+1}] {img['filename']} -> /api/assets/{doc_id}/{img['filename']}"
+                         for i, img in enumerate(valid_images)]
+                images_index_text = "위에 첨부된 이미지 목록 (순서대로):\n" + "\n".join(lines)
+                logger.info(f"멀티모달 인제스트: '{original_filename}' ({len(valid_images)}개 이미지 직접 전달)")
+            else:
+                images_index_text = "(추출된 이미지 없음 - 텍스트 기반으로만 처리)"
+                logger.info(f"텍스트 전용 인제스트: '{original_filename}' (이미지 없음)")
+
+            # 대형 문서 청크 분할 (25,000자 기준)
             chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=25000)
-            logger.info(f"LLM 인제스트 실행: '{original_filename}' (총 길이: {len(raw_md)}자, 청크 수: {len(chunks)})")
+            logger.info(f"총 {len(raw_md)}자, {len(chunks)}개 청크로 분할 처리")
 
             processed_parts = []
             for idx, chunk in enumerate(chunks):
                 is_first = (idx == 0)
-                prompt = (
-                    f"다음은 '{original_filename}' 문서의 [{'파트 ' + str(idx+1) + '/' + str(len(chunks)) if len(chunks) > 1 else '전체'}] Raw 텍스트 및 표 데이터입니다.\n\n"
+                part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
+
+                # 텍스트 프롬프트 구성
+                text_prompt = (
+                    f"다음은 '{original_filename}' ({part_label}) kordoc 1차 Raw 추출 데이터와 "
+                    f"{'위에 첨부된 실제 이미지 파일들' if valid_images and is_first else '이미지 참조 정보'}입니다.\n\n"
                     f"[문서 메타데이터]\n"
                     f"- DOC_ID: {doc_id}\n"
                     f"- ORIGINAL_FILENAME: {original_filename}\n"
                     f"- EXT: {ext}\n"
                     f"- NOW_TIME: {now_str}\n"
                     f"- FILE_HASH: {file_hash}\n"
-                    f"- IS_FIRST_CHUNK: {'예 (상단 메타데이터 헤더 작성 필요)' if is_first else '아니오 (본문만 연속 작성)'}\n\n"
-                    f"[추출된 이미지 에셋 목록]\n"
-                    f"{images_summary}\n\n"
-                    f"[kordoc 1차 Raw 추출 데이터 (파트 {idx+1})]\n"
+                    f"- IS_FIRST_CHUNK: {'예 (메타데이터 헤더 및 전체 TOC 작성 필요)' if is_first else '아니오 (본문만 연속 작성, 메타데이터 헤더 불필요)'}\n\n"
+                    f"[이미지 에셋 경로 인덱스]\n"
+                    f"{images_index_text}\n\n"
+                    f"[kordoc Raw 추출 텍스트 ({part_label})]\n"
                     f"```markdown\n"
                     f"{chunk}\n"
                     f"```\n\n"
-                    f"위 데이터를 kordoc-wiki-ingest 스킬의 5대 원칙(Zero Information Loss, Dual-Mode 수치화, 인라인 도표 결합)에 따라 최고 품질의 100% 무삭제 마크다운으로 작성해 주십시오."
+                    f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
+                    f"100% 무삭제 완본 마크다운을 작성하십시오. "
+                    f"첨부 이미지의 차트를 직접 보고 내부 수치·범례·단위를 정확히 읽어내어 Dual-Mode 수치 표를 구성하십시오."
                 )
+
+                # 멀티모달 콘텐츠 배열 구성:
+                # - 첫 청크: 텍스트 + 전체 이미지 (LLM이 이미지-텍스트 위치 맥락 파악)
+                # - 후속 청크: 텍스트만 (이미지 컨텍스트는 첫 청크에서 이미 확립됨)
+                if is_first and image_parts:
+                    contents = [types.Part.from_text(text=text_prompt)] + image_parts
+                else:
+                    contents = [types.Part.from_text(text=text_prompt)]
 
                 response = client.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=prompt,
+                    contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
                         temperature=0.2,
@@ -157,13 +216,15 @@ class KordocWikiAgent:
 
                 if response and response.text:
                     processed_parts.append(response.text.strip())
+                    logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(response.text)}자 생성)")
                 else:
-                    logger.warning(f"청크 {idx+1} 변환 실패, 룰베이스 폴백 사용")
+                    logger.warning(f"청크 {idx+1} LLM 응답 없음, 룰베이스 폴백 전환")
                     return None
 
             full_result = "\n\n".join(processed_parts)
-            logger.info(f"LLM 기반 kordoc-wiki-ingest 전체 파트 변환 성공 ({original_filename})")
+            logger.info(f"멀티모달 kordoc-wiki-ingest 완성 ({original_filename}, 총 {len(full_result)}자)")
             return full_result
+
         except Exception as e:
             logger.warning(f"LLM API 호출 중 오류 발생 (룰베이스 폴백 가동): {e}")
 

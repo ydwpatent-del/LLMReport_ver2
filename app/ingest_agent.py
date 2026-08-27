@@ -95,8 +95,21 @@ class IngestAgent:
         self.manifest_mgr.add_or_update_document(init_entry)
 
         try:
+            is_pdf = file_path.suffix.lower() == ".pdf"
             if hasattr(self.engine, "execute_ingest"):
                 target_md, images, title = self.engine.execute_ingest(file_path, doc_id, file_hash)
+
+                # 스캔본 PDF 자동 감지: 추출 텍스트가 500자 미만이면 OCR 재시도
+                if is_pdf:
+                    md_path = target_md
+                    extracted_text = md_path.read_text(encoding="utf-8", errors="replace") if md_path.exists() else ""
+                    # 메타데이터 헤더(약 300자) 제외한 실질 텍스트가 너무 적으면 스캔본으로 판단
+                    content_body = extracted_text[300:] if len(extracted_text) > 300 else extracted_text
+                    if len(content_body.strip()) < 500:
+                        logger.warning(f"[스캔본 감지] '{file_path.name}' 텍스트 추출량 부족 ({len(content_body)}자) → OCR 모드 재시도")
+                        target_md, images, title = self.engine.execute_ingest(
+                            file_path, doc_id, file_hash, enable_ocr=True
+                        )
             else:
                 target_md, images, title = self.engine.convert(file_path, doc_id, file_hash)
 
