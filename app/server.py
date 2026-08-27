@@ -95,12 +95,20 @@ def create_app(
             content=content
         )
 
-    @app.get("/api/assets/{doc_id}/{filename}")
+    @app.get("/api/assets/{doc_id}/{filename:path}")
     async def serve_asset(doc_id: str, filename: str):
         """추출된 이미지 및 도표 에셋 파일을 반환한다."""
-        file_path = settings.assets_dir / doc_id / filename
+        # URL 디코딩 및 안전한 파일 경로 확인
+        safe_filename = Path(filename).name
+        file_path = settings.assets_dir / doc_id / safe_filename
+        
         if not file_path.exists() or not file_path.is_file():
-            raise HTTPException(status_code=404, detail="이미지 파일을 찾을 수 없습니다.")
+            # 혹시 원본 filename 그대로 존재하는 경우 시도
+            direct_path = settings.assets_dir / doc_id / filename
+            if direct_path.exists() and direct_path.is_file():
+                file_path = direct_path
+            else:
+                raise HTTPException(status_code=404, detail="이미지 파일을 찾을 수 없습니다.")
         return FileResponse(file_path)
 
     @app.post("/api/scan")

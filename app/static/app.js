@@ -207,8 +207,37 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderMarkdownContent(content) {
     rawContent.textContent = content;
 
-    // Marked 옵션 설정
+    // Marked 옵션 및 커스텀 이미지 렌더러 설정
+    const renderer = new marked.Renderer();
+
+    renderer.image = function(token) {
+      // Marked v4/v11+ 호환 처리 (객체 또는 인자)
+      let href = typeof token === 'object' ? token.href : token;
+      let title = typeof token === 'object' ? token.title : arguments[1];
+      let text = typeof token === 'object' ? token.text : arguments[2];
+
+      let src = href || '';
+      if (!src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:') && !src.startsWith('/api/assets/')) {
+        const cleanName = src.replace(/^(\.\/|\.\.\/|images\/|\\images\\)/, '').split('/').pop().split('\\').pop();
+        if (currentDoc) {
+          src = `/api/assets/${currentDoc.id}/${cleanName}`;
+        }
+      }
+
+      const caption = text || title || '';
+      const titleAttr = title ? ` title="${title}"` : '';
+      const captionHtml = caption ? `<figcaption class="text-xs text-slate-400 mt-2 font-sans italic text-center">📊 ${caption}</figcaption>` : '';
+
+      return `
+        <figure class="my-6 p-2 bg-slate-800/40 rounded-xl border border-slate-700/60 max-w-full flex flex-col items-center">
+          <img src="${src}" alt="${text || ''}"${titleAttr} class="max-h-[600px] object-contain rounded-lg shadow-md cursor-zoom-in hover:scale-[1.01] transition" loading="lazy" onerror="console.warn('이미지 로드 실패:', this.src);">
+          ${captionHtml}
+        </figure>
+      `;
+    };
+
     marked.setOptions({
+      renderer: renderer,
       gfm: true,
       breaks: true,
       highlight: function(code, lang) {
