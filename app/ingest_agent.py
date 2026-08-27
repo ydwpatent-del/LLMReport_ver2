@@ -1,0 +1,143 @@
+"""watchdog 기반 실시간 파일 감시 및 자동 인제스트 에이전트."""
+
+import logging
+import os
+import re
+import time
+from pathlib import Path
+from typing import Optional
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
+
+from app.hasher import calculate_file_hash
+from app.manifest import ManifestManager, DocumentEntry
+from app.kordoc_engine import KordocEngine
+
+logger = logging.getLogger("IngestAgent")
+
+def sanitize_doc_id(filename: str) -> str:
+    """파일명으로부터 안전하고 고유한 문서 ID를 생성한다."""
+    base = Path(filename).stem
+    clean = re.sub(r'[^a-zA-Z0-9_\uac00-\ud7a3-]', '_', base)
+    timestamp = int(time.time() * 1000)
+    return f"{clean}_{timestamp}"
+
+class SourceFileHandler(FileSystemEventHandler):
+    """Source 디렉토리의 파일 변경 이벤트를 처리하는 핸들러."""
+
+    def __init__(self, agent: "IngestAgent"):
+        self.agent = agent
+
+    def on_created(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self.agent.process_file(Path(event.src_path))
+
+    def on_modified(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self.agent.process_file(Path(event.src_path))
+
+class IngestAgent:
+    """파일 실시간 감시 및 kordoc 자동 변환을 총괄하는 에이전트."""
+
+    def __init__(
+        self,
+        source_dir: Path,
+        manifest_mgr: ManifestManager,
+        engine: KordocEngine,
+        supported_exts: set[str]
+    ):
+        self.source_dir = source_dir
+        self.manifest_mgr = manifest_mgr
+        self.engine = engine
+        self.supported_exts = {ext.lower() for ext in supported_exts}
+        self.observer: Optional[Observer] = None
+
+    def process_file(self, file_path: Path, debounce: float = 0.2) -> bool:
+        """단일 파일에 대해 해시 계산 및 중복 방지 검사 후 마크다운 변환을 수행한다."""
+        if not file_path.exists() or file_path.is_dir():
+            return False
+
+        if file_path.suffix.lower() not in self.supported_exts:
+            return False
+
+        if debounce > 0:
+            time.sleep(debounce)
+
+        try:
+            file_hash = calculate_file_hash(file_path)
+        except Exception as e:
+            logger.warning(f"파일 해시 계산 실패 또는 파일 잠김: {e}")
+            return False
+
+        # 동일한 내용의 완료된 문서가 이미 존재하는 경우 스킵
+        if self.manifest_mgr.is_duplicate(file_hash):
+            logger.info(f"[건너뜀] 이미 변환된 파일입니다: {file_path.name} (Hash: {file_hash[:8]}...)")
+            return False
+
+        doc_id = sanitize_doc_id(file_path.name)
+        stat = file_path.stat()
+
+        logger.info(f"[시작] 신규 문서 인제스트 시작: {file_path.name} (ID: {doc_id})")
+        try:
+            target_md, images, title = self.engine.convert(file_path, doc_id, file_hash)
+            entry = DocumentEntry(
+                id=doc_id,
+                original_filename=file_path.name,
+                source_path=str(file_path),
+                file_hash=file_hash,
+                file_size=stat.st_size,
+                modified_time=stat.st_mtime,
+                target_md_path=str(target_md),
+                assets_dir=str(self.engine.assets_dir / doc_id),
+                status="completed",
+                title=title
+            )
+            self.manifest_mgr.add_or_update_document(entry)
+            logger.info(f"[성공] 마크다운 변환 완료 및 WikiDB 등록: {target_md.name}")
+            return True
+        except Exception as e:
+            logger.error(f"[오류] 문서 변환 실패 {file_path.name}: {e}")
+            entry = DocumentEntry(
+                id=doc_id,
+                original_filename=file_path.name,
+                source_path=str(file_path),
+                file_hash=file_hash,
+                file_size=stat.st_size,
+                modified_time=stat.st_mtime,
+                target_md_path="",
+                assets_dir="",
+                status="failed",
+                title=file_path.stem,
+                error_message=str(e)
+            )
+            self.manifest_mgr.add_or_update_document(entry)
+            return False
+
+    def scan_now(self) -> tuple[int, int]:
+        """Source 폴더의 모든 파일을 즉시 검사하여 신규 파일을 변환한다. (성공건수, 스킵건수 반환)"""
+        processed_count = 0
+        skipped_count = 0
+        for file_path in sorted(self.source_dir.glob("*.*")):
+            if file_path.suffix.lower() in self.supported_exts:
+                if self.process_file(file_path, debounce=0.0):
+                    processed_count += 1
+                else:
+                    skipped_count += 1
+        return processed_count, skipped_count
+
+    def start(self) -> None:
+        """백그라운드 파일 감시자를 가동한다."""
+        if self.observer is None:
+            self.observer = Observer()
+            handler = SourceFileHandler(self)
+            self.observer.schedule(handler, str(self.source_dir), recursive=False)
+            self.observer.start()
+            logger.info(f"Source 폴더 실시간 감시 시작: {self.source_dir}")
+
+    def stop(self) -> None:
+        """백그라운드 파일 감시자를 안전하게 종료한다."""
+        if self.observer is not None:
+            self.observer.stop()
+            self.observer.join()
+            self.observer = None
+            logger.info("Source 폴더 감시 정지")
