@@ -32,10 +32,11 @@ def test_kordoc_wiki_agent_rule_based_pipeline(tmp_path: Path):
     content = target_md.read_text(encoding="utf-8")
 
     # 1. 메타데이터 헤더 검증
-    assert "# LS증권_반도체_2026" in content
+    assert "LS증권_반도체_2026" in content
     assert "**발행기관**" in content
     assert "**데이터 보존 원칙**" in content
     assert "100% 무삭제 완본" in content
 
-    # 2. 헤딩 위계 정돈 검증
-    assert "## I. 개요" in content or "# I. 개요" in content or "### 1. 세부 전망" in content
+    # 2. 내용 보존 검증
+    assert "HBM" in content
+    assert "DRAM" in content

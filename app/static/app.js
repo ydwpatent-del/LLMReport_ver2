@@ -139,9 +139,15 @@ document.addEventListener('DOMContentLoaded', () => {
     docListContainer.innerHTML = filtered.map(doc => {
       const isSelected = currentDoc && currentDoc.id === doc.id;
       const ext = (doc.original_filename || '').split('.').pop().toUpperCase() || 'DOC';
-      const statusColor = doc.status === 'completed' 
-        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
-        : 'bg-rose-500/20 text-rose-300 border-rose-500/30';
+      
+      let statusBadge = '';
+      if (doc.status === 'completed') {
+        statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">완본</span>';
+      } else if (doc.status === 'processing') {
+        statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/30 flex items-center gap-1"><i class="fa-solid fa-spinner animate-spin text-[9px]"></i> AI 변환 중</span>';
+      } else {
+        statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-rose-500/20 text-rose-300 border-rose-500/30">실패</span>';
+      }
 
       return `
         <div class="doc-card p-2.5 rounded-xl border transition cursor-pointer ${
@@ -153,9 +159,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">
               ${ext}
             </span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded border ${statusColor}">
-              ${doc.status === 'completed' ? '완본' : '실패'}
-            </span>
+            ${statusBadge}
           </div>
           <h4 class="text-xs font-semibold text-white truncate mb-1" title="${doc.title}">
             ${doc.title || doc.original_filename}
@@ -200,6 +204,38 @@ document.addEventListener('DOMContentLoaded', () => {
       if (metaHash) {
         metaHash.textContent = currentDoc.file_hash ? currentDoc.file_hash.substring(0, 16) + '...' : '-';
         metaHash.title = currentDoc.file_hash || '';
+      }
+
+      // 상태별 뱃지
+      if (docStatusBadge) {
+        if (currentDoc.status === 'completed') {
+          docStatusBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+          docStatusBadge.textContent = '완료됨';
+        } else if (currentDoc.status === 'processing') {
+          docStatusBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse';
+          docStatusBadge.textContent = 'AI 변환 중...';
+        } else {
+          docStatusBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30';
+          docStatusBadge.textContent = '변환 실패';
+        }
+      }
+
+      // 처리 중인 경우 로딩 안내
+      if (currentDoc.status === 'processing') {
+        if (renderedContent) {
+          renderedContent.innerHTML = `
+            <div class="flex flex-col items-center justify-center p-12 text-center my-12 bg-slate-800/40 rounded-2xl border border-slate-700/60">
+              <div class="w-14 h-14 rounded-full bg-brand-500/20 border border-brand-500/40 flex items-center justify-center mb-4 text-brand-400">
+                <i class="fa-solid fa-wand-magic-sparkles text-2xl animate-bounce"></i>
+              </div>
+              <h3 class="text-base font-bold text-white mb-1">Gemini AI 위키 인제스트 진행 중</h3>
+              <p class="text-xs text-slate-400 max-w-md leading-relaxed">
+                /kordoc-wiki-ingest 에이전트가 텍스트 전수 복원, 차트 수치화, 도표 캡션 인라인 결합을 수행하고 있습니다. 잠시 후 자동으로 완료됩니다.
+              </p>
+            </div>
+          `;
+        }
+        return;
       }
 
       // 마크다운 렌더링 실행

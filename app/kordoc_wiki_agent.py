@@ -71,6 +71,31 @@ class KordocWikiAgent:
         self.docs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
+    def _split_into_smart_chunks(self, text: str, max_chunk_size: int = 25000) -> list[str]:
+        """대형 문서를 챕터 및 섹션 헤딩 경계를 기준으로 자연스럽게 청크 분할한다."""
+        if len(text) <= max_chunk_size:
+            return [text]
+
+        chunks = []
+        # 섹션 헤딩 단위로 분할 시도
+        sections = re.split(r'(\n(?=#{1,3}\s|[I|V|X|Ⅰ-Ⅻ]+\.\s|\d+\.\s+[가-힣A-Z]))', text)
+        current_chunk = []
+        current_len = 0
+
+        for sec in sections:
+            if current_len + len(sec) > max_chunk_size and current_chunk:
+                chunks.append("".join(current_chunk))
+                current_chunk = [sec]
+                current_len = len(sec)
+            else:
+                current_chunk.append(sec)
+                current_len += len(sec)
+
+        if current_chunk:
+            chunks.append("".join(current_chunk))
+
+        return chunks
+
     def _call_llm_for_wiki_ingest(
         self,
         raw_md: str,
@@ -96,35 +121,49 @@ class KordocWikiAgent:
                 for img in images_info
             ]) if images_info else "(추출된 이미지 없음)"
 
-            prompt = (
-                f"다음은 '{original_filename}' 문서에서 kordoc CLI로 1차 추출한 Raw 텍스트 및 표 데이터입니다.\n\n"
-                f"[문서 정보]\n"
-                f"- DOC_ID: {doc_id}\n"
-                f"- ORIGINAL_FILENAME: {original_filename}\n"
-                f"- EXT: {ext}\n"
-                f"- NOW_TIME: {now_str}\n"
-                f"- FILE_HASH: {file_hash}\n\n"
-                f"[추출된 이미지 에셋 목록]\n"
-                f"{images_summary}\n\n"
-                f"[kordoc 1차 Raw 추출 데이터]\n"
-                f"```markdown\n"
-                f"{raw_md[:30000]}\n"  # 30K 글자 안전 버퍼
-                f"```\n\n"
-                f"위 데이터를 kordoc-wiki-ingest 스킬의 5대 원칙에 따라 최고 품질의 100% 무삭제 위키 완본 마크다운으로 작성해 주십시오."
-            )
+            # 대형 문서인 경우 스마트 청크 분할
+            chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=25000)
+            logger.info(f"LLM 인제스트 실행: '{original_filename}' (총 길이: {len(raw_md)}자, 청크 수: {len(chunks)})")
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
-                    temperature=0.2,
+            processed_parts = []
+            for idx, chunk in enumerate(chunks):
+                is_first = (idx == 0)
+                prompt = (
+                    f"다음은 '{original_filename}' 문서의 [{'파트 ' + str(idx+1) + '/' + str(len(chunks)) if len(chunks) > 1 else '전체'}] Raw 텍스트 및 표 데이터입니다.\n\n"
+                    f"[문서 메타데이터]\n"
+                    f"- DOC_ID: {doc_id}\n"
+                    f"- ORIGINAL_FILENAME: {original_filename}\n"
+                    f"- EXT: {ext}\n"
+                    f"- NOW_TIME: {now_str}\n"
+                    f"- FILE_HASH: {file_hash}\n"
+                    f"- IS_FIRST_CHUNK: {'예 (상단 메타데이터 헤더 작성 필요)' if is_first else '아니오 (본문만 연속 작성)'}\n\n"
+                    f"[추출된 이미지 에셋 목록]\n"
+                    f"{images_summary}\n\n"
+                    f"[kordoc 1차 Raw 추출 데이터 (파트 {idx+1})]\n"
+                    f"```markdown\n"
+                    f"{chunk}\n"
+                    f"```\n\n"
+                    f"위 데이터를 kordoc-wiki-ingest 스킬의 5대 원칙(Zero Information Loss, Dual-Mode 수치화, 인라인 도표 결합)에 따라 최고 품질의 100% 무삭제 마크다운으로 작성해 주십시오."
                 )
-            )
 
-            if response and response.text:
-                logger.info(f"LLM 기반 kordoc-wiki-ingest 변환 성공 ({original_filename})")
-                return response.text.strip()
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
+                        temperature=0.2,
+                    )
+                )
+
+                if response and response.text:
+                    processed_parts.append(response.text.strip())
+                else:
+                    logger.warning(f"청크 {idx+1} 변환 실패, 룰베이스 폴백 사용")
+                    return None
+
+            full_result = "\n\n".join(processed_parts)
+            logger.info(f"LLM 기반 kordoc-wiki-ingest 전체 파트 변환 성공 ({original_filename})")
+            return full_result
         except Exception as e:
             logger.warning(f"LLM API 호출 중 오류 발생 (룰베이스 폴백 가동): {e}")
 

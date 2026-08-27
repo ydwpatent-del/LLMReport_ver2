@@ -78,6 +78,22 @@ class IngestAgent:
         stat = file_path.stat()
 
         logger.info(f"[시작] kordoc-wiki-ingest 에이전트 가동: {file_path.name} (ID: {doc_id})")
+        
+        # 1. 처리 중(processing) 상태 먼저 기록
+        init_entry = DocumentEntry(
+            id=doc_id,
+            original_filename=file_path.name,
+            source_path=str(file_path),
+            file_hash=file_hash,
+            file_size=stat.st_size,
+            modified_time=stat.st_mtime,
+            target_md_path="",
+            assets_dir=str(self.engine.assets_dir / doc_id),
+            status="processing",
+            title=file_path.stem
+        )
+        self.manifest_mgr.add_or_update_document(init_entry)
+
         try:
             if hasattr(self.engine, "execute_ingest"):
                 target_md, images, title = self.engine.execute_ingest(file_path, doc_id, file_hash)
