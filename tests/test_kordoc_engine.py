@@ -33,9 +33,11 @@ def test_convert_markdown_and_text_direct(tmp_path: Path):
 def test_metadata_header_generation(tmp_path: Path):
     """표준 메타데이터 헤더 포맷이 올바른지 검증한다."""
     engine = KordocEngine(docs_dir=tmp_path / "docs", assets_dir=tmp_path / "assets")
-    header = engine._generate_metadata_header("신규 사업 계획서", "business_plan.hwpx", "hash_abc")
+    header = engine._generate_metadata_header("신규 사업 계획서", "business_plan.hwpx", "hash_abc", ".hwpx")
     
     assert "# 신규 사업 계획서" in header
     assert "business_plan.hwpx" in header
+    assert "HWPX" in header
     assert "hash_abc" in header
+    assert "LLM Wiki Ground Truth Source" in header
     assert "---" in header
