@@ -53,6 +53,16 @@ def create_app(
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def add_no_cache_header(request, call_next):
+        """개발 및 실시간 업데이트 중 브라우저 캐시로 인한 구버전 실행을 방지한다."""
+        response = await call_next(request)
+        if request.url.path.startswith("/static") or request.url.path.startswith("/api") or request.url.path == "/":
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

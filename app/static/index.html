@@ -8,17 +8,17 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Font Awesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-  <!-- Marked.js (Markdown Renderer) -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Marked.js (Markdown Renderer) - 로컬 번들 우선 로드 -->
+  <script src="/static/vendor/marked.min.js"></script>
   <!-- Highlight.js (Code Highlighting) -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <link rel="stylesheet" href="/static/vendor/atom-one-dark.min.css">
+  <script src="/static/vendor/highlight.min.js"></script>
   <!-- KaTeX (Math Rendering) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
-  <!-- Custom CSS -->
-  <link rel="stylesheet" href="/static/style.css">
+  <!-- Custom CSS (캐시 버스팅) -->
+  <link rel="stylesheet" href="/static/style.css?v=20260827_03">
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -227,7 +227,7 @@
   <!-- 토스트 알림 컨테이너 -->
   <div id="toastContainer" class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none"></div>
 
-  <!-- 메인 스크립트 -->
-  <script src="/static/app.js"></script>
+  <!-- 메인 스크립트 (캐시 버스팅) -->
+  <script src="/static/app.js?v=20260827_03"></script>
 </body>
 </html>
