@@ -474,9 +474,11 @@ class KordocWikiAgent:
 
             client = genai.Client(api_key=self.api_key)
             logger.info(f"PDF Files API 업로드 시작: {source_path.name}")
+            # 한글 파일명으로 인한 HTTP 헤더 ascii 인코딩 오류 방지용 안전한 display_name 생성
+            safe_display_name = re.sub(r"[^\w\.\-]", "_", source_path.name.encode("ascii", "ignore").decode("ascii")) or f"doc_{doc_id}.pdf"
             uploaded_file = client.files.upload(
                 file=source_path,
-                config={"mime_type": "application/pdf", "display_name": source_path.name}
+                config={"mime_type": "application/pdf", "display_name": safe_display_name}
             )
 
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
