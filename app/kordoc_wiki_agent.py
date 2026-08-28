@@ -211,6 +211,15 @@ class KordocWikiAgent:
             chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=25000)
             logger.info(f"총 {len(raw_md)}자, {len(chunks)}개 청크로 분할 처리")
 
+            # 단일 Chat Session을 생성하여 청크 간 문맥 및 연속성 유지
+            chat = client.chats.create(
+                model="gemini-2.5-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
+                    temperature=0.2,
+                )
+            )
+
             processed_parts = []
             for idx, chunk in enumerate(chunks):
                 is_first = (idx == 0)
@@ -240,20 +249,13 @@ class KordocWikiAgent:
 
                 # 멀티모달 콘텐츠 배열 구성:
                 # - 첫 청크: 텍스트 + 전체 이미지 (LLM이 이미지-텍스트 위치 맥락 파악)
-                # - 후속 청크: 텍스트만 (이미지 컨텍스트는 첫 청크에서 이미 확립됨)
+                # - 후속 청크: 텍스트만 (세션이 이전 대화 컨텍스트 유지)
                 if is_first and image_parts:
-                    contents = [types.Part.from_text(text=text_prompt)] + image_parts
+                    message_content = [types.Part.from_text(text=text_prompt)] + image_parts
                 else:
-                    contents = [types.Part.from_text(text=text_prompt)]
+                    message_content = [types.Part.from_text(text=text_prompt)]
 
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
-                        temperature=0.2,
-                    )
-                )
+                response = chat.send_message(message_content)
 
                 if response and response.text:
                     processed_parts.append(response.text.strip())

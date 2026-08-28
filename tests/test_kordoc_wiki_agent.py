@@ -112,3 +112,41 @@ def test_pdf_file_api_cleanup_on_failure(tmp_path: Path):
 
         assert result is None
         mock_client.files.delete.assert_called_once_with(name="files/test_temp_file_id")
+
+
+def test_chat_session_used_for_chunked_docs(tmp_path: Path):
+    """25,000자를 초과하여 분할 처리되는 대형 문서에 대해 단일 Chat Session을 유지하며 처리하는지 검증한다."""
+    docs_dir = tmp_path / "docs"
+    assets_dir = tmp_path / "assets"
+    agent = KordocWikiAgent(docs_dir=docs_dir, assets_dir=assets_dir, api_key="fake-api-key")
+
+    # 25,000자 초과 텍스트 구성 (2개 이상의 청크 분할 유도)
+    section1 = "# 섹션 1: 반도체 산업 개요\n" + ("HBM DRAM 낸드플래시 공급망 분석 내용입니다. " * 700) + "\n"
+    section2 = "# 섹션 2: 밸류체인 전망\n" + ("소부장 기업들의 실적 개선 전망 분석 내용입니다. " * 700) + "\n"
+    raw_md = section1 + section2
+    assert len(raw_md) > 25000
+
+    mock_client = MagicMock()
+    mock_chat = MagicMock()
+    mock_response_1 = MagicMock()
+    mock_response_1.text = "# 변환 결과 1"
+    mock_response_2 = MagicMock()
+    mock_response_2.text = "## 변환 결과 2"
+    mock_chat.send_message.side_effect = [mock_response_1, mock_response_2]
+    mock_client.chats.create.return_value = mock_chat
+
+    with patch("google.genai.Client", return_value=mock_client):
+        result = agent._call_llm_for_wiki_ingest(
+            raw_md=raw_md,
+            doc_id="test_chunked_doc",
+            original_filename="대형문서.md",
+            file_hash="hash_chunked_123",
+            images_info=[]
+        )
+
+        assert result is not None
+        assert "# 변환 결과 1" in result
+        assert "## 변환 결과 2" in result
+        mock_client.chats.create.assert_called_once()
+        assert mock_chat.send_message.call_count >= 2
+
