@@ -160,3 +160,36 @@ def test_chat_session_used_for_chunked_docs(tmp_path: Path):
         mock_client.chats.create.assert_called_once()
         assert mock_chat.send_message.call_count >= 2
 
+
+def test_validate_and_fix_image_links(tmp_path: Path):
+    """실존하지 않는 허구의 이미지 링크가 실제 에셋 파일로 정확히 안전 보정되는지 검증한다."""
+    docs_dir = tmp_path / "docs"
+    assets_dir = tmp_path / "assets"
+    agent = KordocWikiAgent(docs_dir=docs_dir, assets_dir=assets_dir)
+
+    doc_id = "test_doc_001"
+    doc_asset_dir = assets_dir / doc_id
+    doc_asset_dir.mkdir(parents=True, exist_ok=True)
+
+    # 실제 디스크에 image_001.png ~ image_003.png 생성
+    (doc_asset_dir / "image_001.png").write_bytes(b"fake1")
+    (doc_asset_dir / "image_002.png").write_bytes(b"fake2")
+    (doc_asset_dir / "image_003.png").write_bytes(b"fake3")
+
+    md_with_invalid_link = (
+        "# 제목\n\n"
+        "![차트 1](/api/assets/test_doc_001/image_001.png)\n\n"
+        "![차트 99](/api/assets/test_doc_001/image_099.png)\n"
+    )
+
+    fixed_md = agent._validate_and_fix_image_links(
+        final_md=md_with_invalid_link,
+        doc_id=doc_id,
+        doc_asset_dir=doc_asset_dir
+    )
+
+    assert "image_001.png" in fixed_md
+    assert "image_099.png" not in fixed_md
+    assert "image_003.png" in fixed_md  # 마지막 실제 파일로 안전 매핑됨
+
+

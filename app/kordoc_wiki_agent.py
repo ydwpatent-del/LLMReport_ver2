@@ -243,8 +243,10 @@ class KordocWikiAgent:
                     f"{chunk}\n"
                     f"```\n\n"
                     f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
-                    f"100% 무삭제 완본 마크다운을 작성하십시오. "
-                    f"첨부 이미지의 차트를 직접 보고 내부 수치·범례·단위를 정확히 읽어내어 Dual-Mode 수치 표를 구성하십시오."
+                    f"100% 무삭제 완본 마크다운을 작성하십시오.\n"
+                    f"★ [이미지 태그 엄격 보존 규칙]:\n"
+                    f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/image_XXX.png)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
+                    f"2. 각 이미지가 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
                 )
 
                 # 멀티모달 콘텐츠 배열 구성:
@@ -525,6 +527,44 @@ class KordocWikiAgent:
                 except Exception as del_e:
                     logger.warning(f"Files API 임시 파일 삭제 실패: {del_e}")
 
+    def _validate_and_fix_image_links(
+        self,
+        final_md: str,
+        doc_id: str,
+        doc_asset_dir: Path
+    ) -> str:
+        """마크다운 본문의 이미지 링크가 실제 에셋 파일과 100% 일치하도록 검증 및 보정한다."""
+        if not doc_asset_dir.exists():
+            return final_md
+
+        actual_files = sorted([f.name for f in doc_asset_dir.glob("*.png") if f.is_file()])
+        if not actual_files:
+            return final_md
+
+        actual_set = set(actual_files)
+
+        def replace_link(match):
+            alt = match.group(1)
+            src = match.group(2)
+            filename = Path(src).name
+            if filename in actual_set:
+                return f"![{alt}](/api/assets/{doc_id}/{filename})"
+
+            # 실존하지 않는 허구의 이미지 번호(예: image_069.png) 안전 보정
+            num_match = re.search(r'(\d+)', filename)
+            if num_match:
+                num = int(num_match.group(1))
+                if 1 <= num <= len(actual_files):
+                    fixed_name = actual_files[num - 1]
+                    return f"![{alt}](/api/assets/{doc_id}/{fixed_name})"
+                else:
+                    fixed_name = actual_files[-1]
+                    return f"![{alt}](/api/assets/{doc_id}/{fixed_name})"
+            return match.group(0)
+
+        fixed_md = re.sub(r'!\[(.*?)\]\((.*?)\)', replace_link, final_md)
+        return fixed_md
+
     def execute_ingest(
         self,
         source_path: Path,
@@ -598,6 +638,13 @@ class KordocWikiAgent:
                 original_filename=source_path.name,
                 file_hash=file_hash
             )
+
+        # 2.5 이미지 링크 실존 에셋 100% 매칭 검증 및 보정
+        final_md = self._validate_and_fix_image_links(
+            final_md=final_md,
+            doc_id=doc_id,
+            doc_asset_dir=doc_asset_dir
+        )
 
         # 3. 마크다운 파일 디스크 저장
         target_md_path.write_text(final_md, encoding="utf-8")
