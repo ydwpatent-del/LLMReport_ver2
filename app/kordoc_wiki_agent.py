@@ -539,23 +539,10 @@ class KordocWikiAgent:
         doc_asset_dir = self.assets_dir / doc_id
         ext = source_path.suffix.lower()
         source_parent = source_path.parent
-
-        # 0. PDF 파일이고 API 키가 있는 경우 Gemini Files API 기반 직접 변환 우선 시도
-        if ext == ".pdf" and self.api_key:
-            pdf_result_md = self._process_pdf_via_file_api(
-                source_path=source_path,
-                doc_id=doc_id,
-                file_hash=file_hash
-            )
-            if pdf_result_md:
-                target_md_path.write_text(pdf_result_md, encoding="utf-8")
-                self._run_kordoc_lint(target_md_path)
-                return target_md_path, [], title
-
         raw_md = ""
         extracted_images_info = []
 
-        # 1. 원본 형식별 1차 추출
+        # 1. 원본 형식별 1차 추출 (텍스트 파싱 및 고화질 이미지 에셋 추출)
         if ext in {".txt", ".md"}:
             raw_content = source_path.read_text(encoding="utf-8", errors="replace")
             search_dirs = [source_parent, source_parent / "images", self.assets_dir / doc_id]

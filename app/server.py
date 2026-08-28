@@ -116,17 +116,35 @@ def create_app(
     @app.get("/api/assets/{doc_id}/{filename:path}")
     async def serve_asset(doc_id: str, filename: str):
         """추출된 이미지 및 도표 에셋 파일을 반환한다."""
-        # URL 디코딩 및 안전한 파일 경로 확인
-        safe_filename = Path(filename).name
-        file_path = settings.assets_dir / doc_id / safe_filename
-        
+        import urllib.parse
+        clean_doc_id = urllib.parse.unquote(doc_id)
+        clean_filename = urllib.parse.unquote(filename)
+        safe_filename = Path(clean_filename).name
+
+        target_dir = settings.assets_dir / clean_doc_id
+        if not target_dir.exists():
+            # 인코딩되지 않은 doc_id로도 시도
+            target_dir = settings.assets_dir / doc_id
+
+        if not target_dir.exists():
+            # 부분 일치 검색 (안전망)
+            for d in settings.assets_dir.iterdir():
+                if d.is_dir() and (d.name == clean_doc_id or d.name == doc_id or clean_doc_id in d.name):
+                    target_dir = d
+                    break
+
+        file_path = target_dir / safe_filename
         if not file_path.exists() or not file_path.is_file():
-            # 혹시 원본 filename 그대로 존재하는 경우 시도
-            direct_path = settings.assets_dir / doc_id / filename
-            if direct_path.exists() and direct_path.is_file():
-                file_path = direct_path
-            else:
-                raise HTTPException(status_code=404, detail="이미지 파일을 찾을 수 없습니다.")
+            # 디렉토리 내 대소문자 무시 검색
+            if target_dir.exists() and target_dir.is_dir():
+                for f in target_dir.iterdir():
+                    if f.is_file() and (f.name.lower() == safe_filename.lower() or f.name.lower() == clean_filename.lower()):
+                        file_path = f
+                        break
+
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f"이미지 파일을 찾을 수 없습니다: {filename}")
+
         return FileResponse(file_path)
 
     @app.post("/api/scan")
