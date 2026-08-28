@@ -376,6 +376,26 @@ class KordocWikiAgent:
 
         return header + captioned_text.strip() + "\n"
 
+    def _is_meaningful_image(self, img_path: Path) -> bool:
+        """단순 아이콘, 로고 조각, 데코레이션 글리치 노이즈를 걸러내고 실제 유의미한 차트·도표만 선별한다."""
+        try:
+            size = img_path.stat().st_size
+            if size < 2500:
+                return False
+
+            with open(img_path, 'rb') as f:
+                head = f.read(32)
+                # PNG 헤더 파싱
+                if len(head) >= 24 and head[:8] == b'\x89PNG\r\n\x1a\n':
+                    w, h = struct.unpack('>LL', head[16:24])
+                    return (w >= 140 and h >= 90) and (w * h >= 25000)
+                # JPEG 헤더
+                elif len(head) >= 2 and head[:2] == b'\xff\xd8':
+                    return size >= 4000
+            return size >= 2500
+        except Exception:
+            return True
+
     def _extract_and_inline_images(
         self,
         raw_md: str,
@@ -383,7 +403,7 @@ class KordocWikiAgent:
         doc_asset_dir: Path,
         search_dirs: list[Path]
     ) -> tuple[str, list[dict]]:
-        """모든 이미지 에셋을 추출 및 복사하고 /api/assets/ 경로로 100% 인라인 매핑한다."""
+        """모든 이미지 에셋 중 유의미한 차트·도표만 추출 및 복사하고 /api/assets/ 경로로 100% 인라인 매핑한다."""
         doc_asset_dir.mkdir(parents=True, exist_ok=True)
         images_info: list[dict] = []
         available_images: dict[str, Path] = {}
@@ -394,9 +414,9 @@ class KordocWikiAgent:
                     if img_path.is_file() and img_path.suffix.lower() in IMAGE_EXTENSIONS:
                         available_images[img_path.name.lower()] = img_path
 
-        def resolve_img(src_ref: str) -> str:
+        def resolve_img(src_ref: str) -> Optional[str]:
             clean = src_ref.strip().strip("'\"").replace("\\", "/")
-            if clean.startswith(("http://", "https://", "data:", "/api/assets/")):
+            if clean.startswith(("http://", "https://", "data:")):
                 return clean
 
             filename = Path(clean).name
@@ -411,22 +431,38 @@ class KordocWikiAgent:
                 matched = available_images.get(clean.lower()) or available_images.get(filename.lower())
 
             if matched and matched.exists():
+                # 자투리 아이콘/노이즈 이미지 필터링
+                if not self._is_meaningful_image(matched):
+                    return None
+
                 target = doc_asset_dir / matched.name
                 shutil.copy2(matched, target)
                 images_info.append({"filename": matched.name, "path": target})
                 return f"/api/assets/{doc_id}/{matched.name}"
 
-            return f"/api/assets/{doc_id}/{filename}"
+            return None
 
-        # 마크다운 및 HTML 치환
-        adjusted = re.sub(
-            r'!\[(.*?)\]\((.*?)\)',
-            lambda m: f'![{m.group(1)}]({resolve_img(m.group(2))})',
-            raw_md
-        )
+        # 마크다운 이미지 치환 (노이즈는 태그 자체 제거)
+        def md_img_repl(m):
+            alt = m.group(1)
+            resolved = resolve_img(m.group(2))
+            if resolved:
+                return f"![{alt}]({resolved})"
+            return ""
+
+        adjusted = re.sub(r'!\[(.*?)\]\((.*?)\)', md_img_repl, raw_md)
+
+        def html_img_repl(m):
+            prefix = m.group(1)
+            resolved = resolve_img(m.group(2))
+            suffix = m.group(3)
+            if resolved:
+                return f'<img {prefix}src="{resolved}"{suffix}>'
+            return ""
+
         adjusted = re.sub(
             r'<img\s+([^>]*?)src=["\'](.*?)["\']([^>]*?)>',
-            lambda m: f'<img {m.group(1)}src="{resolve_img(m.group(2))}"{m.group(3)}>',
+            html_img_repl,
             adjusted,
             flags=re.IGNORECASE
         )
