@@ -307,25 +307,26 @@ document.addEventListener('DOMContentLoaded', () => {
           img.className = 'max-h-[650px] max-w-full object-contain rounded-lg shadow-lg cursor-zoom-in hover:scale-[1.01] transition border border-slate-700';
           img.loading = 'lazy';
 
-          // 3. figure & figcaption 감싸기
-          let containerElem = (img.parentElement && img.parentElement.tagName === 'P') ? img.parentElement : img;
-          let prevElem = containerElem.previousElementSibling;
-          let hasDuplicateTitleBefore = false;
-
-          if (prevElem && altText) {
-            const prevText = prevElem.textContent.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
-            const cleanAlt = altText.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
-            if (prevText && cleanAlt && (prevText === cleanAlt || prevText.includes(cleanAlt) || cleanAlt.includes(prevText))) {
-              hasDuplicateTitleBefore = true;
-            }
-          }
-
+          // 3. figure & figcaption 감싸기 (안전한 replaceWith 사용)
           if (img.parentElement && img.parentElement.tagName !== 'FIGURE') {
+            let containerElem = (img.parentElement && img.parentElement.tagName === 'P') ? img.parentElement : img;
+            let prevElem = containerElem.previousElementSibling;
+            let hasDuplicateTitleBefore = false;
+
+            if (prevElem && altText) {
+              const prevText = prevElem.textContent.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
+              const cleanAlt = altText.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
+              if (prevText && cleanAlt && (prevText === cleanAlt || prevText.includes(cleanAlt) || cleanAlt.includes(prevText))) {
+                hasDuplicateTitleBefore = true;
+              }
+            }
+
             const figure = document.createElement('figure');
             figure.className = 'my-6 p-3 bg-slate-800/50 rounded-2xl border border-slate-700/70 max-w-full flex flex-col items-center shadow-inner';
             
-            img.parentElement.insertBefore(figure, img);
-            figure.appendChild(img);
+            // img 복제 및 figure 구성
+            const imgClone = img.cloneNode(true);
+            figure.appendChild(imgClone);
 
             // 본문 직전에 이미 제목이 명시되어 있는 경우 중복 figcaption 표기 생략
             if (altText && altText !== 'image' && !hasDuplicateTitleBefore) {
@@ -334,16 +335,23 @@ document.addEventListener('DOMContentLoaded', () => {
               caption.innerHTML = `<i class="fa-regular fa-image text-brand-400 mr-1"></i> ${altText}`;
               figure.appendChild(caption);
             }
-          }
 
-          // 4. 클릭 시 라이트박스 모달 줌
-          img.addEventListener('click', () => {
-            if (modalImage && imageModal) {
-              modalImage.src = img.src;
-              if (modalCaption) modalCaption.textContent = altText || '문서 추출 이미지';
-              imageModal.classList.remove('hidden');
+            // 클릭 시 라이트박스 모달 줌 연결
+            imgClone.addEventListener('click', () => {
+              if (modalImage && imageModal) {
+                modalImage.src = imgClone.src;
+                if (modalCaption) modalCaption.textContent = altText || '문서 추출 이미지';
+                imageModal.classList.remove('hidden');
+              }
+            });
+
+            // 안전하게 DOM 노드 치환
+            if (img.parentElement && img.parentElement.tagName === 'P' && img.parentElement.childNodes.length === 1) {
+              img.parentElement.replaceWith(figure);
+            } else {
+              img.replaceWith(figure);
             }
-          });
+          }
         });
 
         // [코드 문법 하이라이팅]
@@ -373,7 +381,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       console.error('마크다운 렌더링 에러:', err);
       if (renderedContent) {
-        renderedContent.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${content}</pre>`;
+        renderedContent.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${mdContent}</pre>`;
       }
     }
 
