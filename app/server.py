@@ -1,6 +1,7 @@
 """FastAPI 웹 서버 및 REST API 라우터."""
 
 import shutil
+import logging
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -12,6 +13,8 @@ from pydantic import BaseModel
 from app.config import Settings, get_settings
 from app.manifest import ManifestManager, DocumentEntry
 from app.ingest_agent import IngestAgent
+
+logger = logging.getLogger(__name__)
 
 class DocumentResponse(BaseModel):
     """문서 목록 반환용 DTO."""
@@ -112,6 +115,58 @@ def create_app(
             error_message=doc.error_message,
             content=content
         )
+
+    @app.delete("/api/documents/{doc_id}")
+    async def delete_document(doc_id: str):
+        """특정 문서를 삭제하고, WikiDB 내의 마크다운 파일 및 에셋 이미지들을 전면 삭제한다."""
+        import urllib.parse
+        clean_id = urllib.parse.unquote(doc_id)
+
+        # 1. manifest에서 문서 조회
+        doc = manifest_mgr.get_document(clean_id) or manifest_mgr.get_document(doc_id)
+        if not doc:
+            for d in manifest_mgr.get_all_documents():
+                if d.id == clean_id or d.id == doc_id or d.title == clean_id:
+                    doc = d
+                    break
+
+        target_id = doc.id if doc else clean_id
+
+        # 2. 마크다운 파일 삭제
+        deleted_files = []
+        if doc and doc.target_md_path:
+            md_path = Path(doc.target_md_path)
+            if md_path.exists():
+                md_path.unlink(missing_ok=True)
+                deleted_files.append(str(md_path))
+
+        # 기본 docs_dir 내 md 파일도 안전 삭제
+        for candidate_name in [f"{target_id}.md", f"{doc_id}.md", f"{clean_id}.md"]:
+            cand_path = settings.docs_dir / candidate_name
+            if cand_path.exists():
+                cand_path.unlink(missing_ok=True)
+                deleted_files.append(str(cand_path))
+
+        # 3. 에셋 디렉터리 및 내부 이미지 전면 삭제
+        deleted_asset_dirs = []
+        for candidate_dir_name in [target_id, doc_id, clean_id]:
+            asset_path = settings.assets_dir / candidate_dir_name
+            if asset_path.exists() and asset_path.is_dir():
+                shutil.rmtree(asset_path, ignore_errors=True)
+                deleted_asset_dirs.append(str(asset_path))
+
+        # 4. manifest에서 제거
+        manifest_mgr.delete_document(target_id)
+        if doc_id != target_id:
+            manifest_mgr.delete_document(doc_id)
+
+        logger.info(f"문서 삭제 완료: ID={target_id}, 마크다운={deleted_files}, 에셋={deleted_asset_dirs}")
+        return {
+            "message": "문서와 관련 에셋이 성공적으로 삭제되었습니다.",
+            "deleted_id": target_id,
+            "deleted_files_count": len(deleted_files),
+            "deleted_assets_dirs": deleted_asset_dirs
+        }
 
     @app.get("/api/assets/{doc_id}/{filename:path}")
     async def serve_asset(doc_id: str, filename: str):

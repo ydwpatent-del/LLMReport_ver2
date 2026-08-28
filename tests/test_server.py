@@ -75,6 +75,29 @@ def test_api_endpoints(tmp_path: Path):
     assert res_scan.status_code == 200
     assert "processed_count" in res_scan.json()
 
+    # 6. 문서 및 에셋 삭제 API 검증 (DELETE)
+    # 에셋 디렉터리 및 임시 이미지 생성
+    asset_dir = settings.assets_dir / "sample_doc"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    (asset_dir / "image_001.png").write_bytes(b"fake_image_bytes")
+
+    assert doc_md.exists()
+    assert asset_dir.exists()
+
+    res_del = client.delete("/api/documents/sample_doc")
+    assert res_del.status_code == 200
+    del_data = res_del.json()
+    assert del_data["deleted_id"] == "sample_doc"
+
+    # 삭제 후 파일 및 에셋, manifest 부재 검증
+    assert not doc_md.exists()
+    assert not asset_dir.exists()
+    assert manifest_mgr.get_document("sample_doc") is None
+
+    # 재조회 시 목록 0건
+    res_after = client.get("/api/documents")
+    assert len(res_after.json()) == 0
+
     # 6. 루트 HTML 및 정적 파일 라우팅 검증
     res_root = client.get("/")
     assert res_root.status_code == 200

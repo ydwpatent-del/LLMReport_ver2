@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const rawContent = document.getElementById('rawContent');
   const toggleRawBtn = document.getElementById('toggleRawBtn');
   const copyMdBtn = document.getElementById('copyMdBtn');
+  const deleteDocHeaderBtn = document.getElementById('deleteDocHeaderBtn');
   const tocContainer = document.getElementById('tocContainer');
 
   const imageModal = document.getElementById('imageModal');
@@ -157,7 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       return `
-        <div class="doc-card p-2.5 rounded-xl border transition cursor-pointer ${
+        <div class="doc-card group relative p-2.5 rounded-xl border transition cursor-pointer ${
           isSelected 
             ? 'bg-slate-700/90 border-brand-500 shadow-md shadow-brand-500/10' 
             : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-700/50 hover:border-slate-600'
@@ -166,9 +167,14 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">
               ${ext}
             </span>
-            ${statusBadge}
+            <div class="flex items-center gap-1.5">
+              ${statusBadge}
+              <button class="delete-doc-btn opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded transition" title="문서 및 에셋 전체 삭제" data-id="${doc.id}" data-title="${doc.title || doc.original_filename}">
+                <i class="fa-regular fa-trash-can text-[11px]"></i>
+              </button>
+            </div>
           </div>
-          <h4 class="text-xs font-semibold text-white truncate mb-1" title="${doc.title}">
+          <h4 class="text-xs font-semibold text-white truncate mb-1 pr-4" title="${doc.title}">
             ${doc.title || doc.original_filename}
           </h4>
           <div class="flex items-center justify-between text-[10px] text-slate-400">
@@ -181,12 +187,59 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 카드 클릭 이벤트 바인딩
     docListContainer.querySelectorAll('.doc-card').forEach(card => {
-      card.addEventListener('click', () => {
+      card.addEventListener('click', (e) => {
+        // 삭제 버튼 클릭 시 문서 선택 방지
+        if (e.target.closest('.delete-doc-btn')) return;
         const id = card.getAttribute('data-id');
         loadDocument(id);
         toggleMobileMenu(false);
       });
     });
+
+    // 삭제 버튼 이벤트 바인딩
+    docListContainer.querySelectorAll('.delete-doc-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const docId = btn.getAttribute('data-id');
+        const title = btn.getAttribute('data-title') || '해당 문서';
+        
+        if (!confirm(`정말로 '${title}' 문서를 삭제하시겠습니까?\n\nWikiDB의 마크다운 파일 및 추출된 모든 이미지 에셋이 영구 삭제됩니다.`)) {
+          return;
+        }
+
+        await deleteDocument(docId);
+      });
+    });
+  }
+
+  // 4.5 문서 삭제 처리 함수
+  async function deleteDocument(docId) {
+    try {
+      showToast('문서 및 에셋을 삭제하는 중...', 'info');
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `삭제 실패 (${res.status})`);
+      }
+
+      showToast('문서와 관련 에셋이 완전히 삭제되었습니다.', 'success');
+
+      // 현재 보고 있던 문서가 삭제된 경우 뷰어 초기화
+      if (currentDoc && (currentDoc.id === docId || currentDoc.id === decodeURIComponent(docId))) {
+        currentDoc = null;
+        if (documentViewer) documentViewer.classList.add('hidden');
+        if (emptyView) emptyView.classList.remove('hidden');
+      }
+
+      // 목록 새로고침
+      await fetchDocuments();
+    } catch (err) {
+      console.error('문서 삭제 오류:', err);
+      showToast(`삭제 실패: ${err.message}`, 'error');
+    }
   }
 
   // 5. 문서 상세 및 마크다운 본문 로드
@@ -447,6 +500,18 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch (err) {
         showToast('복사에 실패했습니다.', 'error');
       }
+    });
+  }
+
+  // 9.5 헤더 문서 삭제 버튼
+  if (deleteDocHeaderBtn) {
+    deleteDocHeaderBtn.addEventListener('click', async () => {
+      if (!currentDoc) return;
+      const title = currentDoc.title || currentDoc.original_filename || '현재 문서';
+      if (!confirm(`정말로 '${title}' 문서를 삭제하시겠습니까?\n\nWikiDB의 마크다운 파일 및 추출된 모든 이미지 에셋이 영구 삭제됩니다.`)) {
+        return;
+      }
+      await deleteDocument(currentDoc.id);
     });
   }
 
