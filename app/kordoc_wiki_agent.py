@@ -449,6 +449,78 @@ class KordocWikiAgent:
         except Exception as e:
             logger.warning(f"kordoc lint 실행 오류 (무시됨): {e}")
 
+    def _process_pdf_via_file_api(
+        self,
+        source_path: Path,
+        doc_id: str,
+        file_hash: str
+    ) -> Optional[str]:
+        """Gemini Files API를 통해 PDF를 업로드하고 Chat 세션에서 무삭제 마크다운으로 변환한다."""
+        if not self.api_key:
+            return None
+
+        # 50MB 초과 파일은 kordoc CLI 폴백 유도
+        if source_path.stat().st_size > 50 * 1024 * 1024:
+            logger.info(f"PDF 파일이 50MB를 초과하여 kordoc CLI 경로로 폴백: {source_path.name}")
+            return None
+
+        uploaded_file = None
+        client = None
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=self.api_key)
+            logger.info(f"PDF Files API 업로드 시작: {source_path.name}")
+            uploaded_file = client.files.upload(
+                file=source_path,
+                config={"mime_type": "application/pdf", "display_name": source_path.name}
+            )
+
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            prompt = (
+                f"다음 첨부된 PDF 문서('{source_path.name}')를 kordoc-wiki-ingest 5대 원칙에 따라 100% 무삭제 완본 마크다운으로 변환하십시오.\n\n"
+                f"[문서 메타데이터]\n"
+                f"- DOC_ID: {doc_id}\n"
+                f"- ORIGINAL_FILENAME: {source_path.name}\n"
+                f"- EXT: PDF\n"
+                f"- NOW_TIME: {now_str}\n"
+                f"- FILE_HASH: {file_hash}\n"
+                f"- IS_FIRST_CHUNK: 예 (메타데이터 헤더 및 전체 TOC 작성 필요)\n\n"
+                f"문서 내 모든 텍스트, 각주, 도표, 차트(Dual-Mode 수치 표 포함), 종합 재무제표를 단 하나의 생략 없이 완전하게 복원하십시오."
+            )
+
+            chat = client.chats.create(
+                model="gemini-2.5-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
+                    temperature=0.2,
+                )
+            )
+
+            response = chat.send_message([
+                types.Part.from_uri(file_uri=uploaded_file.uri, mime_type="application/pdf"),
+                types.Part.from_text(text=prompt)
+            ])
+
+            if response and response.text:
+                logger.info(f"PDF Files API 변환 성공: {source_path.name} ({len(response.text)}자)")
+                return response.text.strip()
+
+            logger.warning(f"PDF Files API 응답 비어있음: {source_path.name}")
+            return None
+
+        except Exception as e:
+            logger.warning(f"PDF Files API 처리 중 오류 발생 (폴백 진행): {e}")
+            return None
+        finally:
+            if client and uploaded_file and hasattr(uploaded_file, "name"):
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                    logger.info(f"Files API 임시 파일 삭제 완료: {uploaded_file.name}")
+                except Exception as del_e:
+                    logger.warning(f"Files API 임시 파일 삭제 실패: {del_e}")
+
     def execute_ingest(
         self,
         source_path: Path,
@@ -463,6 +535,18 @@ class KordocWikiAgent:
         doc_asset_dir = self.assets_dir / doc_id
         ext = source_path.suffix.lower()
         source_parent = source_path.parent
+
+        # 0. PDF 파일이고 API 키가 있는 경우 Gemini Files API 기반 직접 변환 우선 시도
+        if ext == ".pdf" and self.api_key:
+            pdf_result_md = self._process_pdf_via_file_api(
+                source_path=source_path,
+                doc_id=doc_id,
+                file_hash=file_hash
+            )
+            if pdf_result_md:
+                target_md_path.write_text(pdf_result_md, encoding="utf-8")
+                self._run_kordoc_lint(target_md_path)
+                return target_md_path, [], title
 
         raw_md = ""
         extracted_images_info = []
