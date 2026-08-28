@@ -308,6 +308,18 @@ document.addEventListener('DOMContentLoaded', () => {
           img.loading = 'lazy';
 
           // 3. figure & figcaption 감싸기
+          let containerElem = (img.parentElement && img.parentElement.tagName === 'P') ? img.parentElement : img;
+          let prevElem = containerElem.previousElementSibling;
+          let hasDuplicateTitleBefore = false;
+
+          if (prevElem && altText) {
+            const prevText = prevElem.textContent.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
+            const cleanAlt = altText.trim().replace(/^[\s\*\#\-\_•·■]+/, '').replace(/[\s\*\#\-\_]+$/, '');
+            if (prevText && cleanAlt && (prevText === cleanAlt || prevText.includes(cleanAlt) || cleanAlt.includes(prevText))) {
+              hasDuplicateTitleBefore = true;
+            }
+          }
+
           if (img.parentElement && img.parentElement.tagName !== 'FIGURE') {
             const figure = document.createElement('figure');
             figure.className = 'my-6 p-3 bg-slate-800/50 rounded-2xl border border-slate-700/70 max-w-full flex flex-col items-center shadow-inner';
@@ -315,7 +327,8 @@ document.addEventListener('DOMContentLoaded', () => {
             img.parentElement.insertBefore(figure, img);
             figure.appendChild(img);
 
-            if (altText && altText !== 'image') {
+            // 본문 직전에 이미 제목이 명시되어 있는 경우 중복 figcaption 표기 생략
+            if (altText && altText !== 'image' && !hasDuplicateTitleBefore) {
               const caption = document.createElement('figcaption');
               caption.className = 'text-xs text-slate-400 mt-2.5 font-sans italic text-center';
               caption.innerHTML = `<i class="fa-regular fa-image text-brand-400 mr-1"></i> ${altText}`;
