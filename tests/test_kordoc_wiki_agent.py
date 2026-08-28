@@ -2,7 +2,24 @@
 
 import pytest
 from pathlib import Path
-from app.kordoc_wiki_agent import KordocWikiAgent
+from app.kordoc_wiki_agent import KordocWikiAgent, KORDOC_WIKI_INGEST_SYSTEM_PROMPT
+
+def test_system_prompt_contains_required_sections():
+    """시스템 프롬프트에 Phase 3~6 및 Mistakes & Rationalizations 표 키워드가 포함되어 있는지 검증한다."""
+    required_keywords = [
+        "Phase 3",
+        "Phase 4",
+        "Phase 5",
+        "전수 복원",
+        "Dual-Mode",
+        "TOC",
+        "재무제표가 너무 길어서",
+        "차트 이미지를 넣었으니",
+        "부록에 한꺼번에",
+    ]
+    for keyword in required_keywords:
+        assert keyword in KORDOC_WIKI_INGEST_SYSTEM_PROMPT, f"누락된 키워드: {keyword}"
+
 
 def test_kordoc_wiki_agent_rule_based_pipeline(tmp_path: Path):
     """KordocWikiAgent가 kordoc-wiki-ingest 5대 원칙에 따라 무삭제 마크다운을 산출하는지 검증한다."""
