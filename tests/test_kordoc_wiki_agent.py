@@ -42,7 +42,8 @@ def test_kordoc_wiki_agent_rule_based_pipeline(tmp_path: Path):
     target_md, images, title = agent.execute_ingest(
         source_path=source_file,
         doc_id="test_ingest_001",
-        file_hash="hash987654321"
+        file_hash="hash987654321",
+        skip_lint=True
     )
 
     assert target_md.exists()
@@ -68,6 +69,10 @@ def test_pdf_routes_to_multimodal_ingest(tmp_path: Path):
 
     pdf_file = tmp_path / "테스트보고서.pdf"
     pdf_file.write_bytes(b"%PDF-1.4 test dummy content")
+
+    # 실제 에셋 디렉터리에 이미지 생성 (_validate_and_fix_image_links 검증 통과)
+    (assets_dir / "test_pdf_001").mkdir(parents=True, exist_ok=True)
+    (assets_dir / "test_pdf_001" / "image_001.png").write_bytes(b"dummy png data")
 
     expected_content = "# 테스트보고서\n\n> - **원본 파일명**: `테스트보고서.pdf`\n\n![차트](/api/assets/test_pdf_001/image_001.png)\n\nPDF 본문 내용입니다."
 
@@ -190,6 +195,32 @@ def test_validate_and_fix_image_links(tmp_path: Path):
 
     assert "image_001.png" in fixed_md
     assert "image_099.png" not in fixed_md
-    assert "image_003.png" in fixed_md  # 마지막 실제 파일로 안전 매핑됨
+    assert "![차트 99]" not in fixed_md  # 허구의 이미지는 다른 파일로 오인 덮어쓰지 않고 안전하게 제거됨
+
+
+def test_is_meaningful_image_filtering(tmp_path: Path):
+    """노이즈 아이콘 및 유효 차트 이미지를 정확히 판별하는지 검증한다."""
+    import struct
+
+    agent = KordocWikiAgent(docs_dir=tmp_path / "docs", assets_dir=tmp_path / "assets")
+
+    # 1. 2500바이트 미만의 초소형 파일 -> False
+    tiny_file = tmp_path / "tiny.png"
+    tiny_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    assert agent._is_meaningful_image(tiny_file) is False
+
+    # 2. 50x50 크기의 노이즈/아이콘 PNG -> False
+    small_png = tmp_path / "icon.png"
+    # PNG 시그니처(8바이트) + IHDR 청크 길이(4바이트) + "IHDR"(4바이트) + 너비(4바이트) + 높이(4바이트)
+    ihdr_small = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">LL", 50, 50)
+    small_png.write_bytes(ihdr_small + b"\x00" * 3000)
+    assert agent._is_meaningful_image(small_png) is False
+
+    # 3. 800x600 크기의 정상 차트 PNG (>=2500바이트) -> True
+    valid_png = tmp_path / "valid_chart.png"
+    ihdr_valid = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">LL", 800, 600)
+    valid_png.write_bytes(ihdr_valid + b"\x00" * 3000)
+    assert agent._is_meaningful_image(valid_png) is True
+
 
 

@@ -12,7 +12,17 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-# .env 파일 로드
+from app.utils import (
+    get_pdf_page_count,
+    is_valid_content_image,
+    generate_standard_metadata_header,
+    generate_toc_and_anchors,
+    validate_red_flags,
+    run_kordoc_lint,
+    render_vector_diagram_pages,
+)
+
+# .env 파일 로드 (환경변수 보조)
 load_dotenv()
 
 logger = logging.getLogger("KordocWikiAgent")
@@ -137,8 +147,8 @@ class KordocWikiAgent:
             return [text]
 
         chunks = []
-        # 섹션 헤딩 단위로 분할 시도
-        sections = re.split(r'(\n(?=#{1,3}\s|[I|V|X|Ⅰ-Ⅻ]+\.\s|\d+\.\s+[가-힣A-Z]))', text)
+        # 섹션 헤딩 단위로 분할 (로마 숫자 대제목 정규식 파이프 버그 수정)
+        sections = re.split(r'(\n(?=#{1,3}\s|(?:[IVX]+|[Ⅰ-Ⅻ]+)\.\s|\d+\.\s+[가-힣A-Z]))', text)
         current_chunk = []
         current_len = 0
 
@@ -164,11 +174,7 @@ class KordocWikiAgent:
         file_hash: str,
         images_info: list[dict]
     ) -> Optional[str]:
-        """Gemini 멀티모달 API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다.
-        
-        A안 (완전 멀티모달): 추출된 이미지를 바이트로 직접 Gemini에 전달.
-        LLM이 차트/도표 이미지를 직접 보고 수치·범례를 읽어 Dual-Mode 표를 생성한다.
-        """
+        """Gemini 멀티모달 API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다."""
         if not self.api_key:
             return None
 
@@ -180,9 +186,8 @@ class KordocWikiAgent:
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             ext = Path(original_filename).suffix.lstrip('.').upper() or "문서"
 
-            # 로드 가능한 이미지 바이트 목록 준비 (path 키가 있고 실제 파일이 존재하는 것만)
+            # 로드 가능한 이미지 바이트 목록 준비
             image_parts = []
-            images_index_text = ""
             valid_images = []
 
             for img in images_info:
@@ -197,15 +202,15 @@ class KordocWikiAgent:
                     except Exception as e:
                         logger.warning(f"이미지 로드 실패 ({img_file.name}): {e}")
 
-            # 이미지 목록 인덱스 텍스트 생성 (LLM이 파일명과 웹 경로를 알 수 있도록)
+            # 이미지 목록 인덱스 텍스트 생성
             if valid_images:
                 lines = [f"[첨부 이미지 {i+1}] {img['filename']} -> /api/assets/{doc_id}/{img['filename']}"
                          for i, img in enumerate(valid_images)]
-                images_index_text = "위에 첨부된 이미지 목록 (순서대로):\n" + "\n".join(lines)
-                logger.info(f"멀티모달 인제스트: '{original_filename}' ({len(valid_images)}개 이미지 직접 전달)")
+                images_index_text = "위에 첨부된 유효 이미지 목록 (순서대로):\n" + "\n".join(lines)
+                logger.info(f"멀티모달 인제스트: '{original_filename}' ({len(valid_images)}개 유효 이미지 전달)")
             else:
                 images_index_text = "(추출된 이미지 없음 - 텍스트 기반으로만 처리)"
-                logger.info(f"텍스트 전용 인제스트: '{original_filename}' (이미지 없음)")
+                logger.info(f"텍스트 전용 인제스트: '{original_filename}' (유효 이미지 없음)")
 
             # 대형 문서 청크 분할 (25,000자 기준)
             chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=25000)
@@ -225,7 +230,6 @@ class KordocWikiAgent:
                 is_first = (idx == 0)
                 part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
 
-                # 텍스트 프롬프트 구성
                 text_prompt = (
                     f"다음은 '{original_filename}' ({part_label}) kordoc 1차 Raw 추출 데이터와 "
                     f"{'위에 첨부된 실제 이미지 파일들' if valid_images and is_first else '이미지 참조 정보'}입니다.\n\n"
@@ -245,13 +249,10 @@ class KordocWikiAgent:
                     f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
                     f"100% 무삭제 완본 마크다운을 작성하십시오.\n"
                     f"★ [이미지 태그 엄격 보존 규칙]:\n"
-                    f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/image_XXX.png)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
+                    f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/...)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
                     f"2. 각 이미지가 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
                 )
 
-                # 멀티모달 콘텐츠 배열 구성:
-                # - 첫 청크: 텍스트 + 전체 이미지 (LLM이 이미지-텍스트 위치 맥락 파악)
-                # - 후속 청크: 텍스트만 (세션이 이전 대화 컨텍스트 유지)
                 if is_first and image_parts:
                     message_content = [types.Part.from_text(text=text_prompt)] + image_parts
                 else:
@@ -285,7 +286,6 @@ class KordocWikiAgent:
         """API 키가 없거나 호출 실패 시 kordoc-wiki-ingest 5대 원칙을 정밀 룰베이스로 수행한다."""
         title = Path(original_filename).stem
         ext = Path(original_filename).suffix.lstrip('.').upper() or "문서"
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         # 1. 발행기관 및 일자 탐지
         publisher = "미상 (원문 기재)"
@@ -359,42 +359,27 @@ class KordocWikiAgent:
             flags=re.IGNORECASE
         )
 
-        # 5. 상단 표준 메타데이터 헤더
-        header = (
-            f"# {title}\n\n"
-            f"> - **원본 파일명**: `{original_filename}`\n"
-            f"> - **발행기관**: {publisher}\n"
-            f"> - **발행일자**: {date_str}\n"
-            f"> - **문서분류**: 기업 및 산업 분석 보고서 / 기술 문서\n"
-            f"> - **핵심 엔티티**: {entity_tags}\n"
-            f"> - **원본형식**: `{ext}`\n"
-            f"> - **인제스트 일시**: `{now_str}`\n"
-            f"> - **무결성 해시 (SHA-256)**: `{file_hash}`\n"
-            f"> - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)\n\n"
-            f"---\n\n"
+        # 5. 표준 메타데이터 헤더 생성
+        header = generate_standard_metadata_header(
+            title=title,
+            original_filename=original_filename,
+            file_hash=file_hash,
+            ext=ext,
+            publisher=publisher,
+            date_str=date_str,
+            category="기업 및 산업 분석 보고서 / 기술 문서",
+            entity_tags=entity_tags
         )
 
-        return header + captioned_text.strip() + "\n"
+        full_doc = header + captioned_text.strip() + "\n"
 
-    def _is_meaningful_image(self, img_path: Path) -> bool:
-        """단순 아이콘, 로고 조각, 데코레이션 글리치 노이즈를 걸러내고 실제 유의미한 차트·도표만 선별한다."""
-        try:
-            size = img_path.stat().st_size
-            if size < 2500:
-                return False
+        # 6. 전체 목차(TOC) 및 앵커 링크 주입
+        full_doc_with_toc = generate_toc_and_anchors(full_doc)
+        return full_doc_with_toc
 
-            with open(img_path, 'rb') as f:
-                head = f.read(32)
-                # PNG 헤더 파싱
-                if len(head) >= 24 and head[:8] == b'\x89PNG\r\n\x1a\n':
-                    w, h = struct.unpack('>LL', head[16:24])
-                    return (w >= 140 and h >= 90) and (w * h >= 25000)
-                # JPEG 헤더
-                elif len(head) >= 2 and head[:2] == b'\xff\xd8':
-                    return size >= 4000
-            return size >= 2500
-        except Exception:
-            return True
+    def _is_meaningful_image(self, img_path: Path, has_caption: bool = False) -> bool:
+        """안티그래비티 kordoc 변환 결과 중 유효한 차트/도표 이미지만 선별한다."""
+        return is_valid_content_image(img_path, has_caption=has_caption)
 
     def _extract_and_inline_images(
         self,
@@ -403,18 +388,19 @@ class KordocWikiAgent:
         doc_asset_dir: Path,
         search_dirs: list[Path]
     ) -> tuple[str, list[dict]]:
-        """모든 이미지 에셋 중 유의미한 차트·도표만 추출 및 복사하고 /api/assets/ 경로로 100% 인라인 매핑한다."""
+        """kordoc CLI가 추출한 이미지 중 유효 이미지만을 선별 자산화하고, 비유효 이미지는 본문에서 제외한다."""
         doc_asset_dir.mkdir(parents=True, exist_ok=True)
         images_info: list[dict] = []
         available_images: dict[str, Path] = {}
 
+        # kordoc이 직접 생성한 이미지 폴더 우선 인덱싱
         for search_dir in search_dirs:
             if search_dir and search_dir.exists():
                 for img_path in search_dir.rglob("*"):
                     if img_path.is_file() and img_path.suffix.lower() in IMAGE_EXTENSIONS:
                         available_images[img_path.name.lower()] = img_path
 
-        def resolve_img(src_ref: str) -> Optional[str]:
+        def resolve_img(src_ref: str, has_caption: bool = False) -> Optional[str]:
             clean = src_ref.strip().strip("'\"").replace("\\", "/")
             if clean.startswith(("http://", "https://", "data:")):
                 return clean
@@ -431,8 +417,9 @@ class KordocWikiAgent:
                 matched = available_images.get(clean.lower()) or available_images.get(filename.lower())
 
             if matched and matched.exists():
-                # 자투리 아이콘/노이즈 이미지 필터링
-                if not self._is_meaningful_image(matched):
+                # 안티그래비티 kordoc 유효 이미지 엄격 선별 (구분선, 노이즈, 초소형 블릿 배제)
+                if not self._is_meaningful_image(matched, has_caption=has_caption):
+                    logger.debug(f"비유효 이미지 배제: {matched.name}")
                     return None
 
                 target = doc_asset_dir / matched.name
@@ -442,10 +429,12 @@ class KordocWikiAgent:
 
             return None
 
-        # 마크다운 이미지 치환 (노이즈는 태그 자체 제거)
+        # 마크다운 이미지 치환 (유효 이미지만 살리고 비유효 이미지는 태그 자체 제거)
         def md_img_repl(m):
             alt = m.group(1)
-            resolved = resolve_img(m.group(2))
+            src = m.group(2)
+            has_caption = any(k in alt for k in ["도표", "그림", "차트", "표", "Figure", "Chart"])
+            resolved = resolve_img(src, has_caption=has_caption)
             if resolved:
                 return f"![{alt}]({resolved})"
             return ""
@@ -454,8 +443,9 @@ class KordocWikiAgent:
 
         def html_img_repl(m):
             prefix = m.group(1)
-            resolved = resolve_img(m.group(2))
+            src = m.group(2)
             suffix = m.group(3)
+            resolved = resolve_img(src, has_caption=False)
             if resolved:
                 return f'<img {prefix}src="{resolved}"{suffix}>'
             return ""
@@ -471,23 +461,7 @@ class KordocWikiAgent:
 
     def _run_kordoc_lint(self, md_path: Path) -> None:
         """kordoc-wiki-ingest Phase 6: 생성된 마크다운에 대해 kordoc lint 자가 검증을 수행한다."""
-        try:
-            cmd = f'cmd /c npx -y kordoc@^4 lint "{md_path.resolve()}"'
-            res = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30
-            )
-            if res.returncode == 0:
-                logger.info(f"kordoc lint 자가 검증 통과: {md_path.name}")
-            else:
-                logger.warning(f"kordoc lint 검증 경고 ({md_path.name}): {res.stdout or res.stderr}")
-        except Exception as e:
-            logger.warning(f"kordoc lint 실행 오류 (무시됨): {e}")
+        run_kordoc_lint(md_path)
 
     def _process_pdf_via_file_api(
         self,
@@ -499,7 +473,7 @@ class KordocWikiAgent:
         if not self.api_key:
             return None
 
-        # 50MB 초과 파일은 kordoc CLI 폴백 유도
+        # 50MB 초과 파일은 kordoc CLI 경로로 폴백
         if source_path.stat().st_size > 50 * 1024 * 1024:
             logger.info(f"PDF 파일이 50MB를 초과하여 kordoc CLI 경로로 폴백: {source_path.name}")
             return None
@@ -512,7 +486,6 @@ class KordocWikiAgent:
 
             client = genai.Client(api_key=self.api_key)
             logger.info(f"PDF Files API 업로드 시작: {source_path.name}")
-            # 한글 파일명으로 인한 HTTP 헤더 ascii 인코딩 오류 방지용 안전한 display_name 생성
             safe_display_name = re.sub(r"[^\w\.\-]", "_", source_path.name.encode("ascii", "ignore").decode("ascii")) or f"doc_{doc_id}.pdf"
             uploaded_file = client.files.upload(
                 file=source_path,
@@ -574,9 +547,6 @@ class KordocWikiAgent:
             return final_md
 
         actual_files = sorted([f.name for f in doc_asset_dir.glob("*.png") if f.is_file()])
-        if not actual_files:
-            return final_md
-
         actual_set = set(actual_files)
 
         def replace_link(match):
@@ -586,17 +556,9 @@ class KordocWikiAgent:
             if filename in actual_set:
                 return f"![{alt}](/api/assets/{doc_id}/{filename})"
 
-            # 실존하지 않는 허구의 이미지 번호(예: image_069.png) 안전 보정
-            num_match = re.search(r'(\d+)', filename)
-            if num_match:
-                num = int(num_match.group(1))
-                if 1 <= num <= len(actual_files):
-                    fixed_name = actual_files[num - 1]
-                    return f"![{alt}](/api/assets/{doc_id}/{fixed_name})"
-                else:
-                    fixed_name = actual_files[-1]
-                    return f"![{alt}](/api/assets/{doc_id}/{fixed_name})"
-            return match.group(0)
+            # 실존하지 않는 허구의 이미지 번호는 다른 파일로 오인 덮어쓰지 않고 안전하게 제거
+            logger.warning(f"실존하지 않는 이미지 링크 감지 및 제거: {filename}")
+            return ""
 
         fixed_md = re.sub(r'!\[(.*?)\]\((.*?)\)', replace_link, final_md)
         return fixed_md
@@ -607,18 +569,20 @@ class KordocWikiAgent:
         doc_id: str,
         file_hash: str,
         enable_ocr: bool = False,
-        page_range: Optional[str] = None
+        page_range: Optional[str] = None,
+        skip_lint: bool = False
     ) -> tuple[Path, list[Path], str]:
-        """kordoc-wiki-ingest 전체 파이프라인(1차 CLI 추출 -> 2차 LLM 에이전트 정돈 -> Lint)을 실행한다."""
+        """kordoc-wiki-ingest 전체 파이프라인(Phase 1 사전진단 -> Phase 2 파싱 -> Phase 3~5 정돈 -> Phase 6 린트)을 실행한다."""
         title = source_path.stem
         target_md_path = self.docs_dir / f"{doc_id}.md"
         doc_asset_dir = self.assets_dir / doc_id
+        doc_asset_dir.mkdir(parents=True, exist_ok=True)
         ext = source_path.suffix.lower()
         source_parent = source_path.parent
         raw_md = ""
         extracted_images_info = []
 
-        # 1. 원본 형식별 1차 추출 (텍스트 파싱 및 고화질 이미지 에셋 추출)
+        # 1. 원본 형식별 1차 추출 (Phase 1 & Phase 2)
         if ext in {".txt", ".md"}:
             raw_content = source_path.read_text(encoding="utf-8", errors="replace")
             search_dirs = [source_parent, source_parent / "images", self.assets_dir / doc_id]
@@ -626,38 +590,83 @@ class KordocWikiAgent:
                 raw_content, doc_id, doc_asset_dir, search_dirs
             )
         else:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_out_md = Path(temp_dir) / "output_raw.md"
-                flags = []
-                if enable_ocr:
-                    flags.append("--ocr --formula-ocr")
-                if page_range:
-                    flags.append(f"-p {page_range}")
+            # Phase 1: PDF 규모 사전 진단 (100페이지 이상 대형 문서는 분할 파싱)
+            total_pages = get_pdf_page_count(source_path) if ext == ".pdf" else 1
+            if total_pages >= 100 and not page_range:
+                logger.info(f"[Phase 1 대형 문서 진단] 총 {total_pages}페이지 감지 → 50페이지 단위 Map-Reduce 분할 파싱 가동")
+                chunk_ranges = []
+                for start_p in range(1, total_pages + 1, 50):
+                    end_p = min(start_p + 49, total_pages)
+                    chunk_ranges.append(f"{start_p}-{end_p}")
 
-                flag_str = " " + " ".join(flags) if flags else ""
-                cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -o "{temp_out_md.resolve()}"{flag_str}'
-                
-                logger.info(f"[kordoc-wiki-ingest 1단계] kordoc CLI 고속 파싱: {cmd}")
-                result = subprocess.run(
-                    cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace"
-                )
+                merged_md_parts = []
+                for p_idx, p_range in enumerate(chunk_ranges):
+                    with tempfile.TemporaryDirectory() as part_temp_dir:
+                        part_out_md = Path(part_temp_dir) / f"part_{p_idx+1}.md"
+                        cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -p {p_range} -o "{part_out_md.resolve()}"'
+                        if enable_ocr:
+                            cmd += " --ocr --formula-ocr"
 
-                if not temp_out_md.exists():
-                    error_detail = (result.stderr or result.stdout or "").strip()
-                    raise RuntimeError(f"kordoc 1차 변환 실패 (코드: {result.returncode}): {error_detail}")
+                        logger.info(f"[kordoc 분할 파싱 {p_idx+1}/{len(chunk_ranges)}] {cmd}")
+                        subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-                temp_raw = temp_out_md.read_text(encoding="utf-8", errors="replace")
-                search_dirs = [Path(temp_dir), Path(temp_dir) / "images", source_parent, source_parent / "images"]
-                raw_md, extracted_images_info = self._extract_and_inline_images(
-                    temp_raw, doc_id, doc_asset_dir, search_dirs
-                )
+                        if part_out_md.exists():
+                            part_text = part_out_md.read_text(encoding="utf-8", errors="replace")
+                            # 이미지 네임스페이스 격리 (pX_image_XXX.png) 및 유효 이미지 선별
+                            part_img_dir = Path(part_temp_dir) / "images"
+                            if part_img_dir.exists():
+                                for img_f in part_img_dir.glob("*.png"):
+                                    if not self._is_meaningful_image(img_f, has_caption=True):
+                                        # 비유효 노이즈 이미지는 태그 제거
+                                        part_text = part_text.replace(f"images/{img_f.name}", "")
+                                        part_text = part_text.replace(img_f.name, "")
+                                        continue
 
-        # 2. kordoc-wiki-ingest 2단계: LLM 에이전트 기반 지능형 정돈 (Dual-Mode, 엔티티, 헤딩 위계)
+                                    ns_name = f"p{p_idx+1}_{img_f.name}"
+                                    shutil.copy2(img_f, doc_asset_dir / ns_name)
+                                    extracted_images_info.append({"filename": ns_name, "path": doc_asset_dir / ns_name})
+                                    # 본문 이미지 태그 치환
+                                    part_text = part_text.replace(f"images/{img_f.name}", f"/api/assets/{doc_id}/{ns_name}")
+                                    part_text = part_text.replace(img_f.name, f"/api/assets/{doc_id}/{ns_name}")
+
+                            merged_md_parts.append(part_text)
+
+                raw_md = "\n\n".join(merged_md_parts)
+            else:
+                # 일반 파싱 (< 100페이지)
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_out_md = Path(temp_dir) / "output_raw.md"
+                    flags = []
+                    if enable_ocr:
+                        flags.append("--ocr --formula-ocr")
+                    if page_range:
+                        flags.append(f"-p {page_range}")
+
+                    flag_str = " " + " ".join(flags) if flags else ""
+                    cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -o "{temp_out_md.resolve()}"{flag_str}'
+
+                    logger.info(f"[kordoc-wiki-ingest 1단계] kordoc CLI 고속 파싱: {cmd}")
+                    result = subprocess.run(
+                        cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace"
+                    )
+
+                    if not temp_out_md.exists():
+                        error_detail = (result.stderr or result.stdout or "").strip()
+                        raise RuntimeError(f"kordoc 1차 변환 실패 (코드: {result.returncode}): {error_detail}")
+
+                    temp_raw = temp_out_md.read_text(encoding="utf-8", errors="replace")
+                    # kordoc이 생성한 images 폴더를 격리된 1순위 원천으로 사용
+                    search_dirs = [Path(temp_dir) / "images", Path(temp_dir)]
+                    raw_md, extracted_images_info = self._extract_and_inline_images(
+                        temp_raw, doc_id, doc_asset_dir, search_dirs
+                    )
+
+        # 2. kordoc-wiki-ingest 2단계: 지능형 정돈 (Phase 3 ~ Phase 5)
         logger.info(f"[kordoc-wiki-ingest 2단계] 지능형 위키 인제스트 정돈 시작 ({source_path.name})")
         final_md = self._call_llm_for_wiki_ingest(
             raw_md=raw_md,
@@ -682,11 +691,29 @@ class KordocWikiAgent:
             doc_asset_dir=doc_asset_dir
         )
 
+        # 2.6 PDF 벡터 도형/텍스트 복합 다이어그램 감지 및 스냅샷 사후 주입 (방안 A: 추가 API 비용 $0)
+        if ext == ".pdf":
+            final_md, vector_diagrams = render_vector_diagram_pages(
+                pdf_path=source_path,
+                markdown_text=final_md,
+                doc_id=doc_id,
+                doc_asset_dir=doc_asset_dir
+            )
+            for vd in vector_diagrams:
+                extracted_images_info.append(vd)
+
         # 3. 마크다운 파일 디스크 저장
         target_md_path.write_text(final_md, encoding="utf-8")
 
-        # 4. kordoc-wiki-ingest 3단계: kordoc lint 자가 검증
-        self._run_kordoc_lint(target_md_path)
+        # 4. Phase 6: Red Flag 자가 검증 및 kordoc lint
+        red_flags = validate_red_flags(final_md)
+        if red_flags:
+            logger.warning(f"⚠️ [kordoc-wiki-ingest Red Flags 감지]: {', '.join(red_flags)}")
+        else:
+            logger.info("✅ [kordoc-wiki-ingest Red Flags 검증 통과] 무삭제 완본 규격 준수 확인")
+
+        if not skip_lint:
+            self._run_kordoc_lint(target_md_path)
 
         extracted_img_paths = [img["path"] for img in extracted_images_info if "path" in img]
         return target_md_path, extracted_img_paths, title
