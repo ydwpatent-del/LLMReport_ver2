@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from app.utils import generate_standard_metadata_header, generate_toc_and_anchors
+
 logger = logging.getLogger("AIRefiner")
 
 class AIRefiner:
@@ -45,20 +47,17 @@ class AIRefiner:
 
         # 3. 핵심 엔티티 추출 (영문 대문자 약어 및 주요 키워드)
         keywords = set()
-        # 파일명에서 키워드 추출
         clean_name = re.sub(r'[0-9_\-\.]', ' ', Path(filename).stem)
         for w in clean_name.split():
             if len(w) >= 2 and not w.isdigit():
                 keywords.add(w)
 
-        # 본문에서 자주 등장하는 기술/산업 핵심 엔티티 추출
         found_abbrs = re.findall(r'\b[A-Z]{2,10}(?:[0-9]{1,3})?\b', text[:3000])
         common_exclude = {"THE", "AND", "FOR", "WITH", "FROM", "PDF", "DOCX", "HWPX", "PAGE", "TOC", "HTTP", "HTTPS", "COM"}
         for abbr in found_abbrs:
             if abbr not in common_exclude and len(abbr) >= 2:
                 keywords.add(abbr)
 
-        # 주요 한글 산업 키워드 탐지
         industry_words = ["반도체", "인공지능", "생성형AI", "전력망", "이차전지", "소부장", "공급망", "재무제표", "습도센서", "자율주행", "바이오"]
         for ind in industry_words:
             if ind in text[:3000] or ind in filename:
@@ -78,19 +77,16 @@ class AIRefiner:
                 normalized_lines.append("")
                 continue
 
-            # 1. 대제목 (I. / II. / Ⅰ. / 제1장 등)
             if re.match(r'^(?:[#\s]*)(?:[I|V|X]+|[Ⅰ-Ⅻ]+)\.\s*(.+)$', stripped):
                 match = re.match(r'^(?:[#\s]*)(?:[I|V|X]+|[Ⅰ-Ⅻ]+)\.\s*(.+)$', stripped)
                 normalized_lines.append(f"\n## {match.group(0).lstrip('#').strip()}")
                 continue
 
-            # 2. 중제목 (1. / 2. / 3. 형태의 독립 단락)
             if re.match(r'^(?:[#\s]*)\d+\.\s+([가-힣A-Za-z0-9].{2,40})$', stripped) and not stripped.endswith(('.', '억원', '%', '달러')):
                 clean_title = stripped.lstrip('#').strip()
                 normalized_lines.append(f"\n### {clean_title}")
                 continue
 
-            # 3. 소제목 (가. / 나. / (1) / 1) 형태)
             if re.match(r'^(?:[#\s]*)(?:[가-하]\.|\(\d+\)|\d+\))\s+([가-힣A-Za-z0-9].{2,40})$', stripped):
                 clean_title = stripped.lstrip('#').strip()
                 normalized_lines.append(f"\n#### {clean_title}")
@@ -102,7 +98,6 @@ class AIRefiner:
 
     def _refine_inline_image_captions(self, text: str) -> str:
         """도표 및 차트 이미지 링크 주변의 캡션(도표 제목, 출처, 단위)을 매끄럽게 인라인 결합한다."""
-        # 1. ![alt](url) 바로 뒤에 등장하는 [도표 X] ... 또는 (자료: ...) 캡션 결합
         def replace_caption_after(match):
             img_tag = match.group(1)
             caption_line = match.group(2).strip()
@@ -128,7 +123,6 @@ class AIRefiner:
         # 1. 메타데이터 분석
         meta = self._extract_metadata_info(raw_md, original_filename)
         ext = Path(original_filename).suffix.lstrip('.').upper() or "문서"
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         # 2. 구조화 및 헤딩 위계 정돈
         structured_md = self._normalize_headings_and_structure(raw_md)
@@ -139,20 +133,18 @@ class AIRefiner:
         # 4. 엔티티 태그 문자열 생성
         entity_tags = " ".join([f"#{e}" for e in meta["entities"]]) if meta["entities"] else "#지식베이스 #전수복원"
 
-        # 5. kordoc-wiki-ingest 표준 메타데이터 헤더 구성
-        header = (
-            f"# {meta['title']}\n\n"
-            f"> - **원본 파일명**: `{original_filename}`\n"
-            f"> - **발행기관**: {meta['publisher']}\n"
-            f"> - **발행일자**: {meta['date']}\n"
-            f"> - **문서분류**: {meta['category']}\n"
-            f"> - **핵심 엔티티**: {entity_tags}\n"
-            f"> - **원본형식**: `{ext}`\n"
-            f"> - **인제스트 일시**: `{now_str}`\n"
-            f"> - **무결성 해시 (SHA-256)**: `{file_hash}`\n"
-            f"> - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)\n\n"
-            f"---\n\n"
+        # 5. kordoc-wiki-ingest 표준 메타데이터 헤더 구성 (단일 함수 일원화)
+        header = generate_standard_metadata_header(
+            title=meta["title"],
+            original_filename=original_filename,
+            file_hash=file_hash,
+            ext=ext,
+            publisher=meta["publisher"],
+            date_str=meta["date"],
+            category=meta["category"],
+            entity_tags=entity_tags
         )
 
-        final_md = header + captioned_md.strip() + "\n"
-        return final_md, meta
+        full_doc = header + captioned_md.strip() + "\n"
+        final_doc_with_toc = generate_toc_and_anchors(full_doc)
+        return final_doc_with_toc, meta
