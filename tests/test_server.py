@@ -98,8 +98,63 @@ def test_api_endpoints(tmp_path: Path):
     res_after = client.get("/api/documents")
     assert len(res_after.json()) == 0
 
-    # 6. 루트 HTML 및 정적 파일 라우팅 검증
+    # 7. 루트 HTML 및 정적 파일 라우팅 검증
     res_root = client.get("/")
     assert res_root.status_code == 200
     assert "LLM Wiki" in res_root.text
     assert "docListContainer" in res_root.text
+
+
+def test_upload_path_traversal_prevention(tmp_path: Path):
+    """파일 업로드 시 경로 순회(Path Traversal) 공격이 차단되고 안전하게 파일명만 남는지 검증한다."""
+    settings = Settings(
+        base_dir=tmp_path,
+        source_dir=tmp_path / "Source",
+        wiki_db_dir=tmp_path / "WikiDB",
+        docs_dir=tmp_path / "WikiDB" / "docs",
+        assets_dir=tmp_path / "WikiDB" / "assets",
+        manifest_path=tmp_path / "WikiDB" / "manifest.json"
+    )
+    settings.ensure_directories()
+    manifest_mgr = ManifestManager(settings.manifest_path)
+    engine = KordocEngine(settings.docs_dir, settings.assets_dir)
+    agent = IngestAgent(settings.source_dir, manifest_mgr, engine, settings.supported_extensions)
+    app = create_app(settings, manifest_mgr, agent)
+    client = TestClient(app)
+
+    # 1. 경로 순회 시도 (../../evil.txt) -> Source 폴더 내 evil.txt로만 안전 저장되어야 함
+    file_content = b"malicious content"
+    files = {"file": ("../../evil.txt", file_content, "text/plain")}
+    res = client.post("/api/upload", files=files)
+    assert res.status_code == 200
+    assert res.json()["filename"] == "evil.txt"
+    assert (settings.source_dir / "evil.txt").exists()
+    assert not (tmp_path / "evil.txt").exists()  # 상위 디렉터리에 생성되지 않음
+
+    # 2. 빈 파일명 또는 점(.)으로 시작하는 숨김 파일 거부 (400)
+    files_invalid = {"file": (".hidden", file_content, "text/plain")}
+    res_inv = client.post("/api/upload", files=files_invalid)
+    assert res_inv.status_code == 400
+
+
+def test_serve_asset_path_traversal_prevention(tmp_path: Path):
+    """에셋 서빙 시 assets_dir 외부 경로 순회 접근 시도가 404 또는 403으로 차단되는지 검증한다."""
+    settings = Settings(
+        base_dir=tmp_path,
+        source_dir=tmp_path / "Source",
+        wiki_db_dir=tmp_path / "WikiDB",
+        docs_dir=tmp_path / "WikiDB" / "docs",
+        assets_dir=tmp_path / "WikiDB" / "assets",
+        manifest_path=tmp_path / "WikiDB" / "manifest.json"
+    )
+    settings.ensure_directories()
+    manifest_mgr = ManifestManager(settings.manifest_path)
+    engine = KordocEngine(settings.docs_dir, settings.assets_dir)
+    agent = IngestAgent(settings.source_dir, manifest_mgr, engine, settings.supported_extensions)
+    app = create_app(settings, manifest_mgr, agent)
+    client = TestClient(app)
+
+    # assets 디렉터리 외부의 파일 접근 시도
+    res = client.get("/api/assets/doc1/../../secret.txt")
+    assert res.status_code in (403, 404)
+
