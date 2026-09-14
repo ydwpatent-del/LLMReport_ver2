@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.utils import generate_standard_metadata_header, generate_toc_and_anchors
+from app.utils import generate_standard_metadata_header, generate_toc_and_anchors, KNOWN_PUBLISHERS
 
 logger = logging.getLogger("AIRefiner")
 
@@ -27,14 +27,8 @@ class AIRefiner:
             "entities": []
         }
 
-        # 1. 발행기관 탐지
-        publishers = [
-            "LS증권", "미래에셋증권", "삼성증권", "KB증권", "NH투자증권", "신한투자증권",
-            "하나증권", "한국투자증권", "메리츠증권", "다올투자증권", "키움증권", "대신증권",
-            "한국은행", "산업통상자원부", "과학기술정보통신부", "금융감독원", "기획재정부",
-            "KDI", "한국개발연구원", "ETRI", "정보통신산업진흥원"
-        ]
-        for pub in publishers:
+        # 1. 발행기관 탐지 (utils.KNOWN_PUBLISHERS 단일 진실원 사용)
+        for pub in KNOWN_PUBLISHERS:
             if pub in filename or pub in text[:1000]:
                 info["publisher"] = pub
                 break

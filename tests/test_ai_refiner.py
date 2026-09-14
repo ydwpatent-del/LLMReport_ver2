@@ -38,3 +38,17 @@ def test_rule_based_refine_headings_and_metadata():
     # 3. 도표 캡션 및 인라인 이미지 결합 검증
     assert "/api/assets/doc1/image_001.png" in refined_md
     assert "*(자료:" in refined_md or "도표 1" in refined_md or "HBM 수요 전망" in refined_md
+
+
+def test_publisher_list_uses_shared_constant():
+    """ai_refiner와 kordoc_wiki_agent 모두 utils.KNOWN_PUBLISHERS를 사용해야 한다."""
+    import inspect
+    from app import ai_refiner, kordoc_wiki_agent
+    from app.utils import KNOWN_PUBLISHERS
+
+    assert isinstance(KNOWN_PUBLISHERS, list) and len(KNOWN_PUBLISHERS) > 0
+    assert "KNOWN_PUBLISHERS" in inspect.getsource(ai_refiner), \
+        "ai_refiner가 KNOWN_PUBLISHERS를 임포트하지 않음"
+    assert "KNOWN_PUBLISHERS" in inspect.getsource(kordoc_wiki_agent), \
+        "kordoc_wiki_agent가 KNOWN_PUBLISHERS를 임포트하지 않음"
+

@@ -22,6 +22,15 @@ logger = logging.getLogger("KordocUtils")
 # 지원 이미지 확장자
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp", ".gif", ".tiff"}
 
+# 발행기관 탐지 기준 목록 — ai_refiner, kordoc_wiki_agent 공용 단일 진실원
+KNOWN_PUBLISHERS = [
+    "LS증권", "미래에셋증권", "삼성증권", "KB증권", "NH투자증권", "신한투자증권",
+    "하나증권", "한국투자증권", "메리츠증권", "다올투자증권", "키움증권", "대신증권",
+    "한국은행", "산업통상자원부", "과학기술정보통신부", "금융감독원", "기획재정부",
+    "KDI", "한국개발연구원", "ETRI", "정보통신산업진흥원",
+]
+
+
 
 def get_pdf_page_count(pdf_path: Path) -> int:
     """PDF 파일의 전체 페이지 수를 바이너리 구조에서 고속으로 추출한다.

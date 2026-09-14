@@ -25,6 +25,7 @@ from app.utils import (
     deduplicate_inlined_images,
     safe_remove_file,
     clean_markdown_typography,
+    KNOWN_PUBLISHERS,
 )
 
 # .env 파일 로드 (환경변수 보조)
@@ -352,12 +353,8 @@ class KordocWikiAgent:
 
         # 1. 발행기관 및 일자 탐지
         publisher = "미상 (원문 기재)"
-        publishers = [
-            "LS증권", "미래에셋증권", "삼성증권", "KB증권", "NH투자증권", "신한투자증권",
-            "하나증권", "한국투자증권", "메리츠증권", "키움증권", "한국은행", "산업통상자원부",
-            "과학기술정보통신부", "금융감독원", "기획재정부", "ETRI", "KDI"
-        ]
-        for pub in publishers:
+        # 1. 발행기관 탐지 (utils.KNOWN_PUBLISHERS 단일 진실원 사용)
+        for pub in KNOWN_PUBLISHERS:
             if pub in original_filename or pub in raw_md[:1000]:
                 publisher = pub
                 break
