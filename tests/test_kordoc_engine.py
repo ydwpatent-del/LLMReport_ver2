@@ -69,3 +69,34 @@ def test_convert_markdown_with_images(tmp_path: Path):
     doc_asset_folder = assets_dir / "doc_img_test"
     assert (doc_asset_folder / "chart_01.png").exists()
     assert (doc_asset_folder / "diagram.jpg").exists()
+
+
+def test_convert_uses_list_args_not_shell_string(tmp_path):
+    """convert()는 shell=False + 리스트 인자 방식으로 subprocess를 호출해야 한다."""
+    from app.kordoc_engine import KordocEngine
+    from unittest.mock import patch, MagicMock
+
+    engine = KordocEngine(docs_dir=tmp_path / "docs", assets_dir=tmp_path / "assets")
+    src = tmp_path / "report.pdf"
+    src.write_bytes(b"%PDF-1.4 dummy")
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        r = MagicMock()
+        r.returncode = 1
+        r.stderr = "mock"
+        r.stdout = ""
+        return r
+
+    with patch("subprocess.run", side_effect=fake_run):
+        try:
+            engine.convert(src, "doc_id", "hash123")
+        except RuntimeError:
+            pass
+
+    assert isinstance(captured.get("args"), list), "리스트 인자 방식을 사용해야 합니다"
+    assert captured.get("kwargs", {}).get("shell") is not True, "shell=True를 사용하면 안 됩니다"
+

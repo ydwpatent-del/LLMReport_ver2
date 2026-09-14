@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -160,19 +161,27 @@ class KordocEngine:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_out_md = Path(temp_dir) / "output_raw.md"
             
-            flags = []
-            if enable_ocr:
-                flags.append("--ocr --formula-ocr")
-            if page_range:
-                flags.append(f"-p {page_range}")
+            # shell=False + 리스트 인자 방식으로 명령어 인젝션 방지
+            npx_path = shutil.which("npx") or "npx"
+            if sys.platform == "win32":
+                # Windows: .cmd 래퍼는 cmd를 통해 실행해야 한다
+                base_args = ["cmd", "/c", npx_path, "-y", "kordoc@^4",
+                             str(source_path.resolve()),
+                             "-o", str(temp_out_md.resolve())]
+            else:
+                base_args = [npx_path, "-y", "kordoc@^4",
+                             str(source_path.resolve()),
+                             "-o", str(temp_out_md.resolve())]
 
-            flag_str = " " + " ".join(flags) if flags else ""
-            cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -o "{temp_out_md.resolve()}"{flag_str}'
-            
-            logger.info(f"kordoc 파싱 시작: {cmd}")
+            if enable_ocr:
+                base_args += ["--ocr", "--formula-ocr"]
+            if page_range:
+                base_args += ["-p", page_range]
+
+            logger.info(f"kordoc 파싱 시작: {' '.join(base_args)}")
             result = subprocess.run(
-                cmd,
-                shell=True,
+                base_args,
+                shell=False,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
