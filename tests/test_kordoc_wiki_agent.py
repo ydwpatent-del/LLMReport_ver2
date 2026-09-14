@@ -216,11 +216,51 @@ def test_is_meaningful_image_filtering(tmp_path: Path):
     small_png.write_bytes(ihdr_small + b"\x00" * 3000)
     assert agent._is_meaningful_image(small_png) is False
 
-    # 3. 800x600 크기의 정상 차트 PNG (>=2500바이트) -> True
+    # 3. 800x600 크기의 정상 차트 PNG (밀도 기준 만족) -> True
     valid_png = tmp_path / "valid_chart.png"
     ihdr_valid = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">LL", 800, 600)
-    valid_png.write_bytes(ihdr_valid + b"\x00" * 3000)
+    valid_png.write_bytes(ihdr_valid + b"\x00" * 15000)
     assert agent._is_meaningful_image(valid_png) is True
+
+
+def test_abnormal_chunk_does_not_discard_previous_results(tmp_path):
+    """마지막 청크가 비정상(30,000자 초과)이어도 이전 청크의 결과가 보존되어야 한다."""
+    from unittest.mock import MagicMock, patch
+    from app.kordoc_wiki_agent import KordocWikiAgent
+
+    agent = KordocWikiAgent(
+        docs_dir=tmp_path / "docs",
+        assets_dir=tmp_path / "assets",
+        api_key="fake-key"
+    )
+
+    mock_response_ok = MagicMock()
+    mock_response_ok.text = "## 섹션 1 변환 결과\n" + ("처리됨. " * 100)
+
+    mock_response_bad = MagicMock()
+    mock_response_bad.text = "X" * 30001
+
+    mock_chat = MagicMock()
+    mock_chat.send_message.side_effect = [mock_response_ok, mock_response_bad]
+
+    raw_md = "## 섹션 1\n" + ("내용. " * 1400) + "\n\n## 섹션 2\n" + ("내용. " * 1400)
+
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.chats.create.return_value = mock_chat
+        mock_client_cls.return_value = mock_client
+
+        result = agent._call_llm_for_wiki_ingest(
+            raw_md=raw_md,
+            doc_id="test_doc",
+            original_filename="test.pdf",
+            file_hash="abc123",
+            images_info=[]
+        )
+
+    assert result is not None, "비정상 청크 1개로 인해 전체 결과가 폐기되었습니다"
+    assert "섹션 1 변환 결과" in result
+
 
 
 

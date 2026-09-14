@@ -19,7 +19,12 @@ from app.utils import (
     generate_toc_and_anchors,
     validate_red_flags,
     run_kordoc_lint,
-    render_vector_diagram_pages,
+    stitch_adjacent_pdf_images,
+    clean_pdf_decorative_images,
+    enrich_composite_overlay_images,
+    deduplicate_inlined_images,
+    safe_remove_file,
+    clean_markdown_typography,
 )
 
 # .env 파일 로드 (환경변수 보조)
@@ -55,8 +60,9 @@ KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/H
    - 첨부된 이미지(도표, 차트, 로드맵, 인증서, 사진)는 문서 말미나 부록에 모으지 말고, 해당 설명이 위치한 본문 문맥 바로 아래에 다음 형식으로 인라인 삽입하십시오:
      ![도표 X: 도표 제목](/api/assets/<DOC_ID>/<IMAGE_FILENAME>)
      *(자료: 기관명/출처, 단위: 억원/%, 범례: A/B/C)*
-   - 막대/꺾은선/원형 차트는 인라인 이미지와 함께, 차트 내부의 원본 수치 데이터를 마크다운 표(`| --- |`)로 반드시 100% 병기하십시오 (Multimodal Dual-Mode).
-   - 첨부된 이미지를 직접 보고 내부 수치, 범례, 단위, 색상 구분을 정확히 읽어내어 수치 표를 구성하십시오.
+   - **통계 차트 (Dual-Mode)**: 막대/꺾은선/원형 차트 등 정량적 통계 수치 그래프는 인라인 이미지와 함께, 차트 내부의 원본 수치 데이터를 마크다운 표(`| --- |`)로 반드시 100% 병기하십시오.
+   - **개념도 / 다이어그램 / 인포그래픽 (단일 이미지 보존)**: 도식, 프로세스 맵, 기술·시장 요약 카드, 아키텍처 다이어그램 등 정성적 시각 구조물은 억지로 텍스트나 표(`| 구분 | 내용 |` 등)로 분해하지 않고, 단일 이미지(`![다이어그램 제목](...)`)로 온전하게 인라인 삽입하십시오. 시각 자료 내부의 단편적 라벨이나 문구를 잘라내어 본문에 표로 중복 기재하지 마십시오.
+   - **장식 그래픽 배제**: 보고서 표지 일러스트, 발행기관 로고/심볼, 머리글/바닥글 장식 그래픽 등 문서 콘텐츠와 무관한 단순 장식 이미지는 본문에 삽입하지 마십시오.
 
 3. Scale-Adaptive Pipeline:
    - 분할 처리 시에도 각 청크의 문맥을 유지하며 전수 복원합니다.
@@ -79,13 +85,23 @@ KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/H
    - 문서의 구조에 맞추어 #, ##, ###, #### 헤딩 위계를 엄격하게 적용하십시오.
    - 전체 목차(Table of Contents, TOC)를 구축하여 각 섹션 내부 앵커 링크를 연결하십시오.
 
+6. 글머리 기호(불릿) 및 각주(Footnote) 표준 서식:
+   - **불릿 기호 체계 통일 및 계층형 들여쓰기 (이중 기호 금지)**:
+     - 1단계(대항목): □ (네모) — 들여쓰기 없음 (`□ 내용`). 줄 시작부에 배치하십시오.
+     - 2단계(중항목): ○ (동그라미) — 공백 2칸 들여쓰기 (`  ○ 내용`). 절대로 앞에 하이픈을 붙여 '- ○' 처럼 이중기호로 작성하지 마십시오. 오직 '○ ' 단일 기호만 사용하십시오.
+     - 3단계(소항목): - (하이픈) — 공백 4칸 들여쓰기 (`    - 내용`). 중복 하이픈('- -')을 쓰지 마십시오.
+   - **각주(Footnote) 표준 분리 (Option A - GFM 각주 문법)**:
+     - 본문 중간에 '- 1) 용어: 설명' 형태로 각주 해설을 일반 리스트처럼 섞어서 나열하지 마십시오.
+     - 본문 인용부에는 단어 바로 뒤에 `단어[^1]`, `단어[^2]` 형태로 표준 마크다운 각주 인용 기호를 붙이십시오.
+     - 각주 정의는 문서 최하단에 `[^1]: **용어**: 설명` 형식으로 격리하여 수록하십시오.
+
 ---
 
 ### 🔄 단계별 정밀 실행 파이프라인 (Phase 3 ~ Phase 6)
 
 - **[Phase 3] 100% 무삭제 전수 복원 & 차트 수치화**:
   1. 본문 해설: 각 장/절의 문장, 불릿, 각주를 단 한 줄도 생략하지 않고 전수 복원합니다.
-  2. 차트 수치화 (Dual-Mode): 막대/꺾은선/원형 차트는 이미지 삽입과 동시에, 차트 내부의 원본 수치 데이터를 독립된 Markdown Table로 100% 병기합니다.
+  2. 차트 수치화 (Dual-Mode): 막대/꺾은선/원형 차트는 이미지 삽입과 동시에, 차트 내부의 원본 수치 데이터를 독립된 Markdown Table로 100% 병기합니다. (단, 인포그래픽/개념도 카드는 억지 표 분해를 금지하고 이미지로 보존)
   3. 종합 재무제표 복원: 포괄손익계산서, 재무상태표, 현금흐름표, 밸류에이션 및 경영지표 등은 모든 세부 계정과목을 단 하나의 셀 누락 없이 완전한 다열 테이블로 재구성합니다.
 
 - **[Phase 4] 시각 자료 인라인 삽입 및 캡션 명시**:
@@ -110,7 +126,9 @@ KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/H
 | 잘못된 생각 (Rationalization) | 실제 원칙 및 해결책 (Reality & Rule) |
 |:---|:---|
 | *"재무제표가 너무 길어서 주요 항목만 요약해도 충분하다."* | **LLM Wiki는 원천 데이터의 세부 계정과목을 바탕으로 추론합니다. 단 하나의 행도 생략하지 마십시오.** |
-| *"차트 이미지를 넣었으니 표는 따로 안 만들어도 된다."* | **텍스트 전용 RAG 검색기나 임베딩 모델은 이미지를 읽지 못합니다. 반드시 수치 표를 병기해야 합니다.** |
+| *"차트 이미지를 넣었으니 표는 따로 안 만들어도 된다."* | **텍스트 전용 RAG 검색기나 임베딩 모델은 이미지를 읽지 못합니다. 통계 수치 차트는 반드시 수치 표를 병기해야 합니다.** |
+| *"인포그래픽 속 요약 카드나 텍스트 박스도 전부 표로 분해해야 한다."* | **개념도, 다이어그램, 인포그래픽 카드는 하나의 온전한 이미지로 유지하며, 내부 텍스트를 억지로 분해하여 본문에 표로 중복 기재하지 마십시오.** |
+| *"보고서 표지 그림이나 헤더/푸터 로고도 이미지니까 본문에 다 넣어야 한다."* | **표지 일러스트나 기관 로고/워터마크 등 비콘텐츠성 장식 그래픽은 본문에 삽입하지 않습니다.** |
 | *"이미지들을 문서 맨 뒤 부록에 한꺼번에 모아두겠다."* | **맥락 분리로 인해 LLM이 텍스트와 도표의 연관성을 잃습니다. 반드시 본문 해당 위치에 인라인 삽입하십시오.** |
 | *"100페이지가 넘는 문서지만 한 번에 다 변환해보겠다."* | **토큰 버퍼 초과로 중간 내용이 잘립니다. 분할 파싱을 적용하십시오.** |
 
@@ -121,6 +139,7 @@ KORDOC_WIKI_INGEST_SYSTEM_PROMPT = """당신은 한국 관공서 공문서(HWP/H
 - 재무제표나 시계열 표의 중간 행들이 생략된 경우
 - 이미지가 본문 위치가 아닌 문서 맨 끝에 몰려 있는 경우
 - 차트 이미지는 삽입되었으나 차트 원본 수치 테이블이 누락된 경우
+- 개념도나 인포그래픽 카드의 내부 라벨을 억지로 잘라내어 무의미한 표로 중복 생성한 경우
 - 상단 메타데이터 블록(발행기관, 일자, 엔티티 태그 등)이 누락된 경우
 
 오직 최종 완성된 마크다운 본문만을 출력하십시오 (별도의 인사말이나 사족 생략).
@@ -141,19 +160,29 @@ class KordocWikiAgent:
         self.docs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
-    def _split_into_smart_chunks(self, text: str, max_chunk_size: int = 25000) -> list[str]:
+    def _split_into_smart_chunks(self, text: str, max_chunk_size: int = 8000) -> list[str]:
         """대형 문서를 챕터 및 섹션 헤딩 경계를 기준으로 자연스럽게 청크 분할한다."""
         if len(text) <= max_chunk_size:
             return [text]
 
         chunks = []
-        # 섹션 헤딩 단위로 분할 (로마 숫자 대제목 정규식 파이프 버그 수정)
-        sections = re.split(r'(\n(?=#{1,3}\s|(?:[IVX]+|[Ⅰ-Ⅻ]+)\.\s|\d+\.\s+[가-힣A-Z]))', text)
+        # 섹션 헤딩 단위로 분할 (h1~h4 및 번호 매김 헤딩)
+        sections = re.split(r'(\n(?=#{1,4}\s|(?:[IVX]+|[Ⅰ-Ⅻ]+)\.\s|\d+\.\s+[가-힣A-Z]))', text)
+
+        # 단일 섹션이 max_chunk_size를 초과하는 경우 문단(\n\n) 단위로 재세분화
+        refined_sections = []
+        for sec in sections:
+            if len(sec) > max_chunk_size:
+                paras = re.split(r'(\n\n+)', sec)
+                refined_sections.extend(paras)
+            else:
+                refined_sections.append(sec)
+
         current_chunk = []
         current_len = 0
 
-        for sec in sections:
-            if current_len + len(sec) > max_chunk_size and current_chunk:
+        for sec in refined_sections:
+            if current_len + len(sec) > max_chunk_size and current_len >= 3000:
                 chunks.append("".join(current_chunk))
                 current_chunk = [sec]
                 current_len = len(sec)
@@ -212,8 +241,8 @@ class KordocWikiAgent:
                 images_index_text = "(추출된 이미지 없음 - 텍스트 기반으로만 처리)"
                 logger.info(f"텍스트 전용 인제스트: '{original_filename}' (유효 이미지 없음)")
 
-            # 대형 문서 청크 분할 (25,000자 기준)
-            chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=25000)
+            # 대형 문서 청크 분할 (8,000자 기준 안전 분할)
+            chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=8000)
             logger.info(f"총 {len(raw_md)}자, {len(chunks)}개 청크로 분할 처리")
 
             # 단일 Chat Session을 생성하여 청크 간 문맥 및 연속성 유지
@@ -221,18 +250,42 @@ class KordocWikiAgent:
                 model="gemini-2.5-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
-                    temperature=0.2,
+                    temperature=0.3,
+                    max_output_tokens=8192,  # 8,000자 청크 기준 최대 약 25,000자로 물리적 상한 강제 (무한 루프 방지)
                 )
             )
 
             processed_parts = []
+            has_successful_chunk = False
             for idx, chunk in enumerate(chunks):
                 is_first = (idx == 0)
                 part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
 
+                # 해당 청크의 Raw 마크다운에 실제로 존재하는 이미지 선별
+                chunk_img_refs = set(re.findall(r'!\[.*?\]\([^\)]*?([^\)\s/]+\.(?:png|jpg|jpeg|webp))', chunk))
+                chunk_images = [img for img in valid_images if img["filename"].lower() in {f.lower() for f in chunk_img_refs}] if len(chunks) > 1 else valid_images
+
+                if chunk_images:
+                    lines = [f"[첨부 이미지 {i+1}] {img['filename']} -> /api/assets/{doc_id}/{img['filename']}"
+                             for i, img in enumerate(chunk_images)]
+                    chunk_images_index = "이 파트에 배치될 유효 이미지 목록:\n" + "\n".join(lines)
+                else:
+                    chunk_images_index = "(이 파트에는 포함된 이미지가 없습니다. 임의로 다른 파트의 이미지를 추가하지 마십시오.)"
+
+                chunk_image_parts = []
+                for img in chunk_images:
+                    img_path = img.get("path")
+                    if img_path and Path(img_path).exists():
+                        img_file = Path(img_path)
+                        mime = MIME_MAP.get(img_file.suffix.lower(), "image/png")
+                        try:
+                            chunk_image_parts.append(types.Part.from_bytes(data=img_file.read_bytes(), mime_type=mime))
+                        except Exception as e:
+                            logger.warning(f"청크 이미지 로드 실패 ({img_file.name}): {e}")
+
                 text_prompt = (
                     f"다음은 '{original_filename}' ({part_label}) kordoc 1차 Raw 추출 데이터와 "
-                    f"{'위에 첨부된 실제 이미지 파일들' if valid_images and is_first else '이미지 참조 정보'}입니다.\n\n"
+                    f"{'위에 첨부된 실제 이미지 파일들' if chunk_images else '이미지 참조 정보'}입니다.\n\n"
                     f"[문서 메타데이터]\n"
                     f"- DOC_ID: {doc_id}\n"
                     f"- ORIGINAL_FILENAME: {original_filename}\n"
@@ -241,31 +294,41 @@ class KordocWikiAgent:
                     f"- FILE_HASH: {file_hash}\n"
                     f"- IS_FIRST_CHUNK: {'예 (메타데이터 헤더 및 전체 TOC 작성 필요)' if is_first else '아니오 (본문만 연속 작성, 메타데이터 헤더 불필요)'}\n\n"
                     f"[이미지 에셋 경로 인덱스]\n"
-                    f"{images_index_text}\n\n"
+                    f"{chunk_images_index}\n\n"
                     f"[kordoc Raw 추출 텍스트 ({part_label})]\n"
                     f"```markdown\n"
                     f"{chunk}\n"
                     f"```\n\n"
                     f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
                     f"100% 무삭제 완본 마크다운을 작성하십시오.\n"
-                    f"★ [이미지 태그 엄격 보존 규칙]:\n"
+                    f"★ [이미지 태그 엄격 보존 및 중복 생성 금지 규칙]:\n"
                     f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/...)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
-                    f"2. 각 이미지가 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
+                    f"2. 위 Raw 텍스트 본문에 등장하지 않는 다른 파트의 이미지를 서두나 특정 위치에 임의로 일괄 나열(dump)하거나 중복 삽입하지 마십시오.\n"
+                    f"3. 각 이미지가 실제로 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
                 )
 
-                if is_first and image_parts:
-                    message_content = [types.Part.from_text(text=text_prompt)] + image_parts
-                else:
-                    message_content = [types.Part.from_text(text=text_prompt)]
+                message_content = [types.Part.from_text(text=text_prompt)] + chunk_image_parts
 
                 response = chat.send_message(message_content)
 
-                if response and response.text:
+                # 비정상 초장문(무한 루프 환각) 감지 시 해당 청크만 원본 텍스트로 대체하여 나머지 결과 보존
+                if response and response.text and len(response.text) <= 30000:
                     processed_parts.append(response.text.strip())
+                    has_successful_chunk = True
                     logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(response.text)}자 생성)")
                 else:
-                    logger.warning(f"청크 {idx+1} LLM 응답 없음, 룰베이스 폴백 전환")
-                    return None
+                    out_len = len(response.text) if (response and response.text) else 0
+                    logger.warning(
+                        f"청크 {idx+1} 비정상 출력 감지 (길이: {out_len}자) → "
+                        f"해당 청크만 원본 텍스트로 대체 (기존 {len(processed_parts)}개 청크 결과 보존)"
+                    )
+                    # 비정상 청크만 원본 텍스트로 대체하여 나머지 결과 보존
+                    processed_parts.append(chunk.strip())
+
+            # 정상 변환된 청크가 하나도 없는 경우(모든 청크 비정상 환각) 룰베이스 폴백 전환
+            if not has_successful_chunk:
+                logger.warning(f"모든 청크({len(chunks)}개) 비정상 출력 감지, 룰베이스 폴백 전환")
+                return None
 
             full_result = "\n\n".join(processed_parts)
             logger.info(f"멀티모달 kordoc-wiki-ingest 완성 ({original_filename}, 총 {len(full_result)}자)")
@@ -375,7 +438,7 @@ class KordocWikiAgent:
 
         # 6. 전체 목차(TOC) 및 앵커 링크 주입
         full_doc_with_toc = generate_toc_and_anchors(full_doc)
-        return full_doc_with_toc
+        return clean_markdown_typography(full_doc_with_toc)
 
     def _is_meaningful_image(self, img_path: Path, has_caption: bool = False) -> bool:
         """안티그래비티 kordoc 변환 결과 중 유효한 차트/도표 이미지만 선별한다."""
@@ -400,7 +463,13 @@ class KordocWikiAgent:
                     if img_path.is_file() and img_path.suffix.lower() in IMAGE_EXTENSIONS:
                         available_images[img_path.name.lower()] = img_path
 
-        def resolve_img(src_ref: str, has_caption: bool = False) -> Optional[str]:
+        def resolve_img(
+            src_ref: str,
+            has_caption: bool = False,
+            context_before: str = "",
+            context_after: str = "",
+            nearest_heading: str = ""
+        ) -> Optional[str]:
             clean = src_ref.strip().strip("'\"").replace("\\", "/")
             if clean.startswith(("http://", "https://", "data:")):
                 return clean
@@ -424,7 +493,13 @@ class KordocWikiAgent:
 
                 target = doc_asset_dir / matched.name
                 shutil.copy2(matched, target)
-                images_info.append({"filename": matched.name, "path": target})
+                images_info.append({
+                    "filename": matched.name,
+                    "path": target,
+                    "context_before": context_before[-80:] if context_before else "",
+                    "context_after": context_after[:80] if context_after else "",
+                    "nearest_heading": nearest_heading
+                })
                 return f"/api/assets/{doc_id}/{matched.name}"
 
             return None
@@ -434,8 +509,35 @@ class KordocWikiAgent:
             alt = m.group(1)
             src = m.group(2)
             has_caption = any(k in alt for k in ["도표", "그림", "차트", "표", "Figure", "Chart"])
-            resolved = resolve_img(src, has_caption=has_caption)
+
+            # 태그 전후 인접 문맥 및 직전 섹션 헤딩 탐색
+            ctx_start = max(0, m.start() - 250)
+            ctx_end = min(len(raw_md), m.end() + 250)
+            surrounding_before = raw_md[ctx_start:m.start()]
+            surrounding_after = raw_md[m.end():ctx_end]
+
+            headings_before = re.findall(r'(?:^|\n)(#{1,4}\s+[^\n]+)', raw_md[:m.start()])
+            nearest_heading = headings_before[-1].lstrip('#').strip() if headings_before else ""
+
+            # kordoc이 alt="image"로만 생성한 경우, 태그 전후 인접 문맥에서 정밀 도표 캡션 및 출처 패턴 감지
+            # 단순 '표' 글자(예: 한국표준산업분류, 대표 등) 매칭으로 인한 오인 차단
+            if not has_caption:
+                caption_pattern = r'(?:(?:도표|그림|차트|표|Figure|Chart)\s*(?:[\d+<\[\(]|[IVX]+|[가-힣A-Za-z]\b))|(?:(?:자료|출처)\s*:)'
+                if re.search(caption_pattern, surrounding_before + surrounding_after, re.IGNORECASE):
+                    has_caption = True
+
+            resolved = resolve_img(
+                src,
+                has_caption=has_caption,
+                context_before=surrounding_before.strip(),
+                context_after=surrounding_after.strip(),
+                nearest_heading=nearest_heading
+            )
             if resolved:
+                # alt가 단순 'image'이거나 비어있는 경우 인접 헤딩을 활용하여 의미 태그로 승격
+                if alt.strip().lower() in ("image", ""):
+                    new_alt = f"도표/인포그래픽 ({nearest_heading})" if nearest_heading else "도표/인포그래픽"
+                    return f"![{new_alt}]({resolved})"
                 return f"![{alt}]({resolved})"
             return ""
 
@@ -540,9 +642,11 @@ class KordocWikiAgent:
         self,
         final_md: str,
         doc_id: str,
-        doc_asset_dir: Path
+        doc_asset_dir: Path,
+        images_info: Optional[list[dict]] = None
     ) -> str:
-        """마크다운 본문의 이미지 링크가 실제 에셋 파일과 100% 일치하도록 검증 및 보정한다."""
+        """마크다운 본문의 이미지 링크가 실제 에셋 파일과 100% 일치하도록 검증 및 보정하며,
+        LLM이 자의적으로 누락시킨 유효 이미지를 문맥 위치에 외과적으로 재주입한다."""
         if not doc_asset_dir.exists():
             return final_md
 
@@ -561,6 +665,114 @@ class KordocWikiAgent:
             return ""
 
         fixed_md = re.sub(r'!\[(.*?)\]\((.*?)\)', replace_link, final_md)
+
+        # 에셋 디렉터리에 실존하는 유효 이미지 중 final_md에서 누락된 이미지 검출 및 외과적 재주입
+        present_files = {
+            Path(m.group(1)).name
+            for m in re.finditer(rf'/api/assets/{re.escape(doc_id)}/([^\)\s]+)', fixed_md)
+        }
+
+        # 목차(TOC) 영역 보호: 목차 블록 내부로는 이미지가 절대 재주입되지 않도록 본문 시작 위치 산출
+        body_start_offset = 0
+        toc_match = re.search(r'(?:^|\n)##\s*목차\b', fixed_md)
+        if toc_match:
+            after_toc = fixed_md[toc_match.end():]
+            first_body_heading = re.search(r'\n##\s+(?!목차\b)[^\n]+', after_toc)
+            if first_body_heading:
+                body_start_offset = toc_match.end() + first_body_heading.start()
+            else:
+                body_start_offset = toc_match.end()
+
+        missing_images = []
+        for info in (images_info or []):
+            fn = info.get("filename")
+            if fn in actual_set and fn not in present_files:
+                img_f = doc_asset_dir / fn
+                # 에셋에 남아있더라도 단순 픽토그램/클립아트 등 비유효 이미지로 판정되면 재주입 배제 및 파일 안전 정리
+                if not self._is_meaningful_image(img_f, has_caption=False):
+                    logger.info(f"🗑️ 누락된 비유효 이미지 재주입 배제 및 에셋 정리: {fn}")
+                    safe_remove_file(img_f)
+                    continue
+                missing_images.append(info)
+
+        if missing_images:
+            logger.info(f"🔍 LLM 생성물 내 유효 이미지 누락 {len(missing_images)}건 감지 → 외과적 재주입 가동")
+
+            for m_info in missing_images:
+                fn = m_info["filename"]
+                heading = m_info.get("nearest_heading") or ""
+                alt_label = f"도표/인포그래픽 ({heading})" if heading else "도표/인포그래픽"
+                reinject_tag = f"\n\n![{alt_label}](/api/assets/{doc_id}/{fn})\n\n"
+
+                ctx_before = m_info.get("context_before", "").strip()
+                ctx_after = m_info.get("context_after", "").strip()
+
+                injected = False
+                body_text = fixed_md[body_start_offset:]
+
+                # 1순위: 직전 문맥 텍스트 매칭 뒤 삽입 (TOC 보호 구역 제외한 본문에서만 탐색)
+                if ctx_before:
+                    candidate_snippets = [
+                        line.strip() for line in ctx_before.split('\n')
+                        if len(line.strip()) >= 5 and not line.strip().startswith(('![', '<img'))
+                    ]
+                    for snip in reversed(candidate_snippets):
+                        snip_esc = re.escape(snip)
+                        match = re.search(rf'({snip_esc})', body_text)
+                        if match:
+                            insert_pos = body_start_offset + match.end()
+                            fixed_md = fixed_md[:insert_pos] + reinject_tag + fixed_md[insert_pos:]
+                            injected = True
+                            logger.info(f"💉 LLM 누락 이미지 직전 문맥('{snip[:15]}...') 뒤 외과적 재주입 성공: {fn}")
+                            break
+
+                # 2순위: 직후 문맥 텍스트 매칭 앞 삽입 (TOC 보호 구역 제외한 본문에서만 탐색)
+                if not injected and ctx_after:
+                    candidate_snippets = [
+                        line.strip() for line in ctx_after.split('\n')
+                        if len(line.strip()) >= 5 and not line.strip().startswith(('![', '<img'))
+                    ]
+                    for snip in candidate_snippets:
+                        snip_esc = re.escape(snip)
+                        match = re.search(rf'({snip_esc})', body_text)
+                        if match:
+                            insert_pos = body_start_offset + match.start()
+                            fixed_md = fixed_md[:insert_pos] + reinject_tag + fixed_md[insert_pos:]
+                            injected = True
+                            logger.info(f"💉 LLM 누락 이미지 직후 문맥('{snip[:15]}...') 앞 외과적 재주입 성공: {fn}")
+                            break
+
+                # 3순위: 인접 헤딩 섹션 내 삽입 (TOC 보호 구역 제외한 본문에서만 탐색)
+                if not injected and heading:
+                    heading_clean = heading.lstrip('#').strip()
+                    heading_match = re.search(rf'(#{1,4}\s+[^\n]*{re.escape(heading_clean)}[^\n]*)', body_text)
+                    if heading_match:
+                        start_pos = body_start_offset + heading_match.end()
+                        next_h = re.search(r'\n#{1,4}\s+', fixed_md[start_pos:])
+                        if next_h:
+                            insert_pos = start_pos + next_h.start()
+                        else:
+                            insert_pos = len(fixed_md)
+                        fixed_md = fixed_md[:insert_pos] + reinject_tag + fixed_md[insert_pos:]
+                        injected = True
+                        logger.info(f"💉 LLM 누락 이미지 인접 헤딩('{heading_clean}') 섹션 내 외과적 재주입 성공: {fn}")
+
+                # 4순위: 본문 말미 결합
+                if not injected:
+                    fixed_md = fixed_md.strip() + reinject_tag
+                    logger.info(f"💉 LLM 누락 이미지 본문 말미 외과적 결합: {fn}")
+
+        # 목차(TOC) 블록 내부 이미지 태그 잔존 방지 안전장치
+        if toc_match and body_start_offset > toc_match.start():
+            toc_segment = fixed_md[toc_match.start():body_start_offset]
+            clean_toc = re.sub(r'!\[.*?\]\(.*?\)\s*\n*', '', toc_segment)
+            if clean_toc != toc_segment:
+                fixed_md = fixed_md[:toc_match.start()] + clean_toc + fixed_md[body_start_offset:]
+                logger.info("🧹 목차(TOC) 영역 내 오삽입된 이미지 태그 정돈 완료")
+
+        # 동일 에셋 이미지 중복 삽입 태그 및 서두 덤프 블록 안전 정돈
+        fixed_md = deduplicate_inlined_images(fixed_md, doc_id=doc_id)
+
         return fixed_md
 
     def execute_ingest(
@@ -581,6 +793,9 @@ class KordocWikiAgent:
         source_parent = source_path.parent
         raw_md = ""
         extracted_images_info = []
+
+        # kordoc CLI 실행 명령어 결정 (로컬 설치 우선, 부재 시 npx 폴백)
+        kordoc_cmd = "kordoc" if shutil.which("kordoc") else "npx -y kordoc@^4"
 
         # 1. 원본 형식별 1차 추출 (Phase 1 & Phase 2)
         if ext in {".txt", ".md"}:
@@ -603,7 +818,7 @@ class KordocWikiAgent:
                 for p_idx, p_range in enumerate(chunk_ranges):
                     with tempfile.TemporaryDirectory() as part_temp_dir:
                         part_out_md = Path(part_temp_dir) / f"part_{p_idx+1}.md"
-                        cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -p {p_range} -o "{part_out_md.resolve()}"'
+                        cmd = f'cmd /c {kordoc_cmd} "{source_path.resolve()}" -p {p_range} -o "{part_out_md.resolve()}"'
                         if enable_ocr:
                             cmd += " --ocr --formula-ocr"
 
@@ -632,6 +847,10 @@ class KordocWikiAgent:
                             merged_md_parts.append(part_text)
 
                 raw_md = "\n\n".join(merged_md_parts)
+                if ext == ".pdf":
+                    raw_md = stitch_adjacent_pdf_images(source_path, raw_md, [doc_asset_dir])
+                    raw_md = clean_pdf_decorative_images(source_path, raw_md, [doc_asset_dir])
+                    raw_md = enrich_composite_overlay_images(source_path, raw_md, [doc_asset_dir])
             else:
                 # 일반 파싱 (< 100페이지)
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -643,7 +862,7 @@ class KordocWikiAgent:
                         flags.append(f"-p {page_range}")
 
                     flag_str = " " + " ".join(flags) if flags else ""
-                    cmd = f'cmd /c npx -y kordoc@^4 "{source_path.resolve()}" -o "{temp_out_md.resolve()}"{flag_str}'
+                    cmd = f'cmd /c {kordoc_cmd} "{source_path.resolve()}" -o "{temp_out_md.resolve()}"{flag_str}'
 
                     logger.info(f"[kordoc-wiki-ingest 1단계] kordoc CLI 고속 파싱: {cmd}")
                     result = subprocess.run(
@@ -662,6 +881,13 @@ class KordocWikiAgent:
                     temp_raw = temp_out_md.read_text(encoding="utf-8", errors="replace")
                     # kordoc이 생성한 images 폴더를 격리된 1순위 원천으로 사용
                     search_dirs = [Path(temp_dir) / "images", Path(temp_dir)]
+
+                    # 수직으로 쪼개진 스트립 이미지 조각 자동 병합, 장식 이미지 배제, 복합 인포그래픽 통 이미지 완성
+                    if ext == ".pdf":
+                        temp_raw = stitch_adjacent_pdf_images(source_path, temp_raw, search_dirs)
+                        temp_raw = clean_pdf_decorative_images(source_path, temp_raw, search_dirs)
+                        temp_raw = enrich_composite_overlay_images(source_path, temp_raw, search_dirs)
+
                     raw_md, extracted_images_info = self._extract_and_inline_images(
                         temp_raw, doc_id, doc_asset_dir, search_dirs
                     )
@@ -684,29 +910,30 @@ class KordocWikiAgent:
                 file_hash=file_hash
             )
 
-        # 2.5 이미지 링크 실존 에셋 100% 매칭 검증 및 보정
+        # 2.5 이미지 링크 실존 에셋 100% 매칭 검증 및 보정 (누락된 유효 이미지 외과적 자동 재주입)
         final_md = self._validate_and_fix_image_links(
             final_md=final_md,
             doc_id=doc_id,
-            doc_asset_dir=doc_asset_dir
+            doc_asset_dir=doc_asset_dir,
+            images_info=extracted_images_info
         )
 
-        # 2.6 PDF 벡터 도형/텍스트 복합 다이어그램 감지 및 스냅샷 사후 주입 (방안 A: 추가 API 비용 $0)
-        if ext == ".pdf":
-            final_md, vector_diagrams = render_vector_diagram_pages(
-                pdf_path=source_path,
-                markdown_text=final_md,
-                doc_id=doc_id,
-                doc_asset_dir=doc_asset_dir
-            )
-            for vd in vector_diagrams:
-                extracted_images_info.append(vd)
+        # 2.8 마크다운 글머리기호(네모-동그라미-하이픈) 및 각주(Option A GFM) 정규화
+        final_md = clean_markdown_typography(final_md)
 
         # 3. 마크다운 파일 디스크 저장
         target_md_path.write_text(final_md, encoding="utf-8")
 
         # 4. Phase 6: Red Flag 자가 검증 및 kordoc lint
         red_flags = validate_red_flags(final_md)
+
+        # 에셋 디렉터리 내 유효 이미지와 마크다운 본문 태그 100% 일치 검증
+        final_tags = set(re.findall(rf'/api/assets/{re.escape(doc_id)}/([^\)\s]+)', final_md))
+        disk_images = {f.name for f in doc_asset_dir.glob("*.png") if f.is_file()}
+        missing_on_md = disk_images - final_tags
+        if missing_on_md:
+            red_flags.append(f"에셋 유효 이미지 마크다운 누락 ({len(missing_on_md)}개: {', '.join(sorted(missing_on_md))})")
+
         if red_flags:
             logger.warning(f"⚠️ [kordoc-wiki-ingest Red Flags 감지]: {', '.join(red_flags)}")
         else:
