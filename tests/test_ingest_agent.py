@@ -78,3 +78,78 @@ def test_ingest_agent_file_modification(tmp_path: Path):
 
     docs = manifest_mgr.get_all_documents()
     assert len(docs) == 2  # 두 버전이 각각 기록됨
+
+
+def test_sanitize_doc_id_uniqueness():
+    """동일한 파일명으로 연속 호출 시에도 UUID 결합으로 고유한 doc_id가 생성되는지 검증한다."""
+    from app.ingest_agent import sanitize_doc_id
+
+    ids = [sanitize_doc_id("공문서_2026.pdf") for _ in range(100)]
+    assert len(set(ids)) == 100  # 100개 모두 중복 없이 고유함
+
+
+def test_ingest_agent_concurrency_lock(tmp_path: Path):
+    """동일한 파일에 대해 동시에 process_file이 호출될 때 상호 배제(Lock)되어 1회만 처리되는지 검증한다."""
+    source_dir = tmp_path / "Source"
+    wiki_db = tmp_path / "WikiDB"
+    docs_dir = wiki_db / "docs"
+    assets_dir = wiki_db / "assets"
+    manifest_path = wiki_db / "manifest.json"
+
+    source_dir.mkdir(parents=True)
+    docs_dir.mkdir(parents=True)
+    assets_dir.mkdir(parents=True)
+
+    manifest_mgr = ManifestManager(manifest_path)
+    engine = KordocEngine(docs_dir, assets_dir)
+    agent = IngestAgent(
+        source_dir=source_dir,
+        manifest_mgr=manifest_mgr,
+        engine=engine,
+        supported_exts={".txt", ".md"}
+    )
+
+    doc_file = source_dir / "parallel_test.txt"
+    doc_file.write_text("동시성 테스트 내용", encoding="utf-8")
+
+    # 인위적으로 processing_files에 등록된 상태를 모사
+    with agent._lock:
+        agent._processing_files.add(doc_file.resolve())
+
+    # 이미 처리 중인 파일은 즉시 False 반환 (중복 처리 방지)
+    result = agent.process_file(doc_file, debounce=0.0)
+    assert result is False
+
+    # 락 해제 후에는 정상 처리 가능
+    with agent._lock:
+        agent._processing_files.discard(doc_file.resolve())
+
+    result_after = agent.process_file(doc_file, debounce=0.0)
+    assert result_after is True
+
+
+def test_process_file_except_does_not_raise_name_error(tmp_path):
+    """is_duplicate 호출 중 예외가 발생해도 NameError 없이 False를 반환해야 한다."""
+    from app.ingest_agent import IngestAgent
+    from app.manifest import ManifestManager
+    from unittest.mock import MagicMock
+
+    src = tmp_path / "test.pdf"
+    src.write_bytes(b"%PDF-1.4 test content here for hashing purposes only")
+
+    manifest_mgr = MagicMock(spec=ManifestManager)
+    manifest_mgr.is_duplicate.side_effect = RuntimeError("DB 오류 시뮬레이션")
+
+    engine = MagicMock()
+    engine.assets_dir = tmp_path / "assets"
+
+    agent = IngestAgent(
+        source_dir=tmp_path,
+        manifest_mgr=manifest_mgr,
+        engine=engine,
+        supported_exts={".pdf"}
+    )
+
+    result = agent.process_file(src, debounce=0.0)
+    assert result is False
+
