@@ -75,7 +75,7 @@ def is_valid_content_image(img_path: Path, has_caption: bool = False) -> bool:
             return False
 
         with open(img_path, "rb") as f:
-            head = f.read(64)
+            head = f.read(512)
 
         width = 0
         height = 0
@@ -84,36 +84,39 @@ def is_valid_content_image(img_path: Path, has_caption: bool = False) -> bool:
         if len(head) >= 24 and head[:8] == b"\x89PNG\r\n\x1a\n":
             width, height = struct.unpack(">LL", head[16:24])
 
-        # JPEG 헤더 파싱 (기본 프레임 마커 탐색)
+        # JPEG 헤더 파싱 (기본 프레임 마커 탐색 - 메모리 버퍼 재사용)
         elif len(head) >= 2 and head[:2] == b"\xff\xd8":
             try:
-                with open(img_path, "rb") as f:
-                    f.seek(2)
-                    while True:
-                        b = f.read(1)
-                        if not b:
-                            break
-                        if b != b"\xff":
-                            continue
-                        marker = f.read(1)
-                        while marker == b"\xff":
-                            marker = f.read(1)
-                        if not marker:
-                            break
-                        marker_val = ord(marker)
-                        # SOF0 ~ SOF3, SOF5 ~ SOF7, SOF9 ~ SOF11, SOF13 ~ SOF15 (이미지 크기 프레임)
-                        if marker_val in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
-                            f.seek(3, 1)  # 길이(2) + 정밀도(1) 건너뜀
-                            h_bytes = f.read(2)
-                            w_bytes = f.read(2)
+                from io import BytesIO
+                buf = BytesIO(head)
+                buf.seek(2)
+                while True:
+                    b = buf.read(1)
+                    if not b:
+                        break
+                    if b != b"\xff":
+                        continue
+                    marker = buf.read(1)
+                    while marker == b"\xff":
+                        marker = buf.read(1)
+                    if not marker:
+                        break
+                    marker_val = ord(marker)
+                    # SOF0 ~ SOF3, SOF5 ~ SOF7, SOF9 ~ SOF11, SOF13 ~ SOF15 (이미지 크기 프레임)
+                    if marker_val in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        buf.seek(3, 1)  # 길이(2) + 정밀도(1) 건너뜀
+                        h_bytes = buf.read(2)
+                        w_bytes = buf.read(2)
+                        if len(h_bytes) == 2 and len(w_bytes) == 2:
                             height, width = struct.unpack(">HH", h_bytes + w_bytes)
+                        break
+                    else:
+                        length_bytes = buf.read(2)
+                        if len(length_bytes) < 2:
                             break
-                        else:
-                            length_bytes = f.read(2)
-                            if len(length_bytes) < 2:
-                                break
-                            length = struct.unpack(">H", length_bytes)[0]
-                            f.seek(length - 2, 1)
+                        length = struct.unpack(">H", length_bytes)[0]
+                        buf.seek(length - 2, 1)
             except Exception:
                 pass
 
