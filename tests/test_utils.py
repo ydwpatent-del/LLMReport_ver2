@@ -11,6 +11,7 @@ from app.utils import (
     run_kordoc_lint,
     safe_remove_file,
     safe_remove_dir,
+    clean_markdown_typography,
 )
 
 def test_get_pdf_page_count(tmp_path: Path):
@@ -89,7 +90,7 @@ def test_validate_red_flags():
     assert any("생략 표현" in f for f in flags)
     assert any("표준 메타데이터 누락" in f for f in flags)
 
-    # 2. 이미지는 있는데 수치 표가 없는 Dual-Mode 위반
+    # 2. 이미지는 있는데 수치 표가 없는 Dual-Mode 위반 (통계 차트 캡션 포함)
     bad_dual_md = (
         "# 제목\n\n"
         "> - **원본 파일명**: `test.pdf`\n"
@@ -97,11 +98,12 @@ def test_validate_red_flags():
         "> - **무결성 해시 (SHA-256)**: `hash`\n"
         "> - **데이터 보존 원칙**: 완본\n\n"
         "![차트](/api/assets/doc/chart.png)\n"
+        "*(자료: 기관, 단위: 억원)*\n"
     )
     flags2 = validate_red_flags(bad_dual_md)
     assert any("Dual-Mode" in f for f in flags2)
 
-    # 3. 완벽한 마크다운
+    # 3. 완벽한 마크다운 (콜론 정렬 표 구분선 지원 검증)
     good_md = (
         "# 제목\n\n"
         "> - **원본 파일명**: `test.pdf`\n"
@@ -109,7 +111,7 @@ def test_validate_red_flags():
         "> - **무결성 해시 (SHA-256)**: `hash`\n"
         "> - **데이터 보존 원칙**: 완본\n\n"
         "![차트](/api/assets/doc/chart.png)\n\n"
-        "| 연도 | 수치 |\n|---|---|\n| 2026 | 100 |\n"
+        "| 연도 | 지표 |\n|:---|---:|\n| 2026 | 100 |\n"
     )
     flags3 = validate_red_flags(good_md)
     assert len(flags3) == 0
@@ -161,3 +163,104 @@ def test_run_kordoc_lint_prefers_local_cli():
             assert passed is True
             # 호출된 명령어에 'cmd /c kordoc lint'가 포함되어야 함
             assert mock_run.call_args[0][0].startswith("cmd /c kordoc lint")
+
+
+def test_clean_markdown_typography_hierarchical_bullets():
+    """불릿 기호 체계(□ -> ○ -> -) 및 계층형 들여쓰기(0칸 -> 2칸 -> 4칸) 정규화 검증."""
+    raw_md = (
+        "## 1. 개요\n\n"
+        "□ 대항목 1\n"
+        "- ○ 중항목 1-1\n"
+        "- - 소항목 1-1-1\n"
+        "- 소항목 1-1-2\n"
+        "○ 중항목 1-2\n"
+        "■ 대항목 2\n"
+        "- 소항목 2-1\n"
+    )
+    cleaned = clean_markdown_typography(raw_md)
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+
+    assert "□ 대항목 1" in lines
+    assert "  ○ 중항목 1-1" in lines
+    assert "    - 소항목 1-1-1" in lines
+    assert "    - 소항목 1-1-2" in lines
+    assert "  ○ 중항목 1-2" in lines
+    assert "□ 대항목 2" in lines
+    assert "  - 소항목 2-1" in lines
+
+
+def test_validate_red_flags_no_dual_mode_false_positive_for_diagram():
+    """개념도 이미지만 있고 수치 표가 없어도 Dual-Mode 위반 오탐이 없어야 한다."""
+    from app.utils import validate_red_flags
+    md = """# 시스템 아키텍처
+> - **원본 파일명**: `arch.pdf`
+> - **발행기관**: 기술팀
+> - **발행일자**: 2026년 01월 01일
+> - **문서분류**: 기술 문서
+> - **핵심 엔티티**: #시스템
+> - **원본형식**: `PDF (100% 무삭제 전수 인제스트)`
+> - **인제스트 일시**: `2026-01-01 00:00:00 UTC`
+> - **무결성 해시 (SHA-256)**: `abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890`
+> - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)
+---
+## 개요
+![시스템 아키텍처](/api/assets/arch_doc/arch_diagram.png)
+*(자료: 기술팀, 시스템 전체 흐름도 개념도)*
+"""
+    flags = validate_red_flags(md, check_metadata=True)
+    dual_flags = [f for f in flags if "Dual-Mode" in f]
+    assert len(dual_flags) == 0, f"개념도에서 Dual-Mode 오탐 발생: {dual_flags}"
+
+
+def test_validate_red_flags_dual_mode_triggers_for_stat_chart():
+    """수치 단위 캡션이 있는 통계 차트 + 표 없음 → Dual-Mode 위반이어야 한다."""
+    from app.utils import validate_red_flags
+    md = """# 시장 분석
+> - **원본 파일명**: `market.pdf`
+> - **발행기관**: 리서치팀
+> - **발행일자**: 2026년 01월 01일
+> - **문서분류**: 리서치 보고서 / 기술 문서
+> - **핵심 엔티티**: #시장
+> - **원본형식**: `PDF (100% 무삭제 전수 인제스트)`
+> - **인제스트 일시**: `2026-01-01 00:00:00 UTC`
+> - **무결성 해시 (SHA-256)**: `abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890`
+> - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)
+---
+## 시장 규모
+![성장 차트](/api/assets/market_doc/growth_chart.png)
+*(자료: 리서치팀, 단위: 억원, CAGR 15%)*
+"""
+    flags = validate_red_flags(md, check_metadata=True)
+    dual_flags = [f for f in flags if "Dual-Mode" in f]
+    assert len(dual_flags) > 0, "통계 차트 + 표 없음에서 Dual-Mode 위반이 감지되어야 합니다"
+
+
+def test_is_valid_content_image_grayscale_safety(tmp_path: Path):
+    """그레이스케일(n=1, n=2) 이미지 검사 시 채널 인덱스 에러 없이 안전하게 처리되는지 검증한다."""
+    import os
+    import pymupdf
+    from app.utils import is_valid_content_image
+
+    # 1. 500x500 그레이스케일(n=1) 이미지 생성 (area = 250,000 >= 200,000 트리거)
+    samples = os.urandom(500 * 500)
+    gray_pix = pymupdf.Pixmap(pymupdf.csGRAY, 500, 500, samples, 0)
+    assert gray_pix.n == 1
+    img_path = tmp_path / "gray_test.png"
+    gray_pix.save(str(img_path))
+
+    # 채널 1(Gray) 처리 시 samples 인덱스 접근 오류 없이 정상 평가되어야 함
+    result = is_valid_content_image(img_path, has_caption=True)
+    assert result is True
+
+    # 2. 500x500 그레이스케일+알파(n=2) 이미지 생성
+    samples_ga = os.urandom(500 * 500 * 2)
+    gray_alpha_pix = pymupdf.Pixmap(pymupdf.csGRAY, 500, 500, samples_ga, 1)
+    assert gray_alpha_pix.n == 2
+    img_ga_path = tmp_path / "gray_alpha_test.png"
+    gray_alpha_pix.save(str(img_ga_path))
+
+    # 채널 2(GA) 처리 시 samples 인덱스 접근 오류 없이 정상 평가되어야 함
+    result_ga = is_valid_content_image(img_ga_path, has_caption=True)
+    assert result_ga is True
+
+
