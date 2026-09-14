@@ -68,3 +68,94 @@ def test_manifest_persistence(tmp_path: Path):
     assert loaded_doc is not None
     assert loaded_doc.title == "영속성 테스트"
     assert loaded_doc.file_hash == "persist_hash_456"
+
+def test_cleanup_zombie_processing(tmp_path: Path):
+    """오래된 processing 상태의 좀비 문서가 failed로 안전 전환되는지 검증한다."""
+    manifest_file = tmp_path / "manifest.json"
+    manager = ManifestManager(manifest_file)
+    
+    # 과거 날짜의 processing 문서 등록
+    doc = DocumentEntry(
+        id="zombie_doc",
+        original_filename="stuck.pdf",
+        source_path="Source/stuck.pdf",
+        file_hash="zombie_hash",
+        file_size=1024,
+        modified_time=1700000000.0,
+        target_md_path="",
+        assets_dir="",
+        status="processing",
+        ingested_at="2020-01-01T00:00:00+00:00",
+        title="고착된 문서"
+    )
+    manager.add_or_update_document(doc)
+    
+    cleaned = manager.cleanup_zombie_processing(timeout_seconds=60)
+    assert cleaned == 1
+    
+    updated = manager.get_document("zombie_doc")
+    assert updated.status == "failed"
+    assert "처리 시간 초과" in updated.error_message
+    # failed 상태이므로 중복 검사에서 통과(새로 처리 가능)
+    assert manager.is_duplicate("zombie_hash") is False
+
+def test_reconcile_with_disk(tmp_path: Path):
+    """디스크 상의 마크다운 파일과 Manifest 불일치 시 자가 치유(Self-Healing)되는지 검증한다."""
+    manifest_file = tmp_path / "manifest.json"
+    docs_dir = tmp_path / "docs"
+    assets_dir = tmp_path / "assets"
+    docs_dir.mkdir()
+    assets_dir.mkdir()
+    
+    manager = ManifestManager(manifest_file)
+    
+    # 1. Manifest에는 잘못된(구버전) target_md_path가 적혀 있음
+    broken_doc = DocumentEntry(
+        id="sample_doc_old_id",
+        original_filename="sample_doc.pdf",
+        source_path="Source/sample_doc.pdf",
+        file_hash="sample_hash",
+        file_size=2048,
+        modified_time=1700000000.0,
+        target_md_path=str(docs_dir / "non_existent.md"),
+        assets_dir=str(assets_dir / "sample_doc_old_id"),
+        status="completed",
+        title="샘플 문서"
+    )
+    manager.add_or_update_document(broken_doc)
+    
+    # 2. 디스크에는 실제 유효 완본 파일이 존재함
+    real_md = docs_dir / "sample_doc_1788000000_abcd1234.md"
+    real_md.write_text("# 샘플 문서\n\n완본 본문 내용입니다.", encoding="utf-8")
+    
+    # 3. 자가 치유 실행
+    res = manager.reconcile_with_disk(docs_dir, assets_dir)
+    assert res["reconciled"] >= 1
+    
+    # 4. 검증: target_md_path가 실존 파일로 갱신되고 ID도 일치화됨
+    healed = manager.get_document("sample_doc_1788000000_abcd1234")
+    assert healed is not None
+    assert healed.target_md_path == str(real_md.resolve())
+    assert healed.status == "completed"
+
+def test_get_all_documents_deduplicates_alias_entries(tmp_path: Path):
+    """alias 항목이 등록되어도 get_all_documents는 고유 파일당 1건만 반환해야 한다."""
+    manifest_file = tmp_path / "manifest.json"
+    mgr = ManifestManager(manifest_file)
+    base = DocumentEntry(
+        id="old_id", original_filename="report.pdf", source_path="/src/report.pdf",
+        file_hash="a" * 64, file_size=1000, modified_time=1000.0,
+        target_md_path="/docs/old_id.md", assets_dir="/assets/old_id",
+        status="completed", title="보고서"
+    )
+    alias = base.model_copy()
+    alias.id = "new_id"
+    alias.target_md_path = "/docs/new_id_longer_path.md"
+
+    mgr.add_or_update_document(base)
+    mgr.add_or_update_document(alias)
+
+    docs = mgr.get_all_documents()
+    completed = [d for d in docs if d.status == "completed" and d.file_hash == base.file_hash]
+    assert len(completed) == 1, f"alias 중복 포함됨: {[d.id for d in completed]}"
+    assert completed[0].id == "new_id"
