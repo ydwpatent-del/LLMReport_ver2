@@ -1,0 +1,4 @@
+# 개발 및 테스트 전용 의존성 (운영 환경에서는 불필요)
+-r requirements.txt
+pytest>=8.0.0
+httpx>=0.27.0
