@@ -404,5 +404,114 @@ def test_refine_report_in_place(tmp_path):
     assert "Score" not in updated_content
 
 
+def test_review_and_refine_api_endpoints(tmp_path):
+    """보고서 리뷰 및 보정(refine) API 엔드포인트 통합 테스트."""
+    from fastapi.testclient import TestClient
+    from app.server import create_app
+    from app.config import Settings
+    from app.topic_router import get_generator
 
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
+    custom_settings = Settings(
+        source_dir=tmp_path / "Source",
+        wiki_db_dir=tmp_path,
+        docs_dir=docs_dir,
+        assets_dir=tmp_path / "assets",
+        manifest_path=tmp_path / "manifest.json"
+    )
+
+    # 1. 초기 임의 테스트 보고서 저장
+    generator = TopicReportGenerator(reports_dir=reports_dir, api_key="dummy_key")
+    initial_md = """# 인공지능 반도체 기술 분석
+> - **문서분류**: 🤖 AI 생성 주제 보고서
+> - **주제어**: 인공지능 반도체
+
+## 1. 기술개요
+AI 연산 가속을 위한 NPU 기술입니다.
+"""
+    saved_info = generator.save_report(
+        topic="인공지능 반도체",
+        markdown=initial_md,
+        sources=[]
+    )
+    report_id = saved_info["id"]
+
+    # LLM 모킹 설정 (보정 시 호출 대응)
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = """# 인공지능 반도체 종합 기술 및 시장 분석 보고서
+> - **문서분류**: 🤖 AI 생성 주제 보고서
+> - **주제어**: 인공지능 반도체
+> - **검수 상태**: ✨ AI 리뷰어 피드백 반영 보정 완료
+
+---
+
+## 1. 기술개요
+보정된 AI 반도체 개요입니다.
+
+## 2. 기술동향
+| 기술 | 특징 |
+|---|---|
+| NPU | 가속기 |
+
+## 3. 시장동향 (국내/세계시장 규모 데이터)
+2030년 1000억 달러 전망.
+
+| 연도 | 규모 |
+|---|---|
+| 2030 | 1000억 달러 |
+
+## 4. 주요업체
+엔비디아
+
+| 업체 | 제품 |
+|---|---|
+| 엔비디아 | H100 |
+
+## 5. 데이터 출처
+- [출처1](/api/documents/doc1)
+"""
+    mock_client.models.generate_content.return_value = mock_response
+    generator.client = mock_client
+
+    app = create_app(settings=custom_settings)
+    app.dependency_overrides[get_generator] = lambda: generator
+    client = TestClient(app)
+
+    # 2. POST /api/topic/reports/{report_id}/review 호출 검증
+    res_review = client.post(f"/api/topic/reports/{report_id}/review")
+    assert res_review.status_code == 200
+    review_data = res_review.json()
+    assert review_data["report_id"] == report_id
+    assert "review" in review_data
+    review = review_data["review"]
+    assert "passed_all" in review
+    assert "checklist" in review
+    assert "defects" in review
+    assert "actionable_suggestions" in review
+    assert review["checklist"]["structure_valid"] is False  # 5대 목차 중 일부 누락 상태
+    assert len(review["defects"]) > 0
+
+    # 3. POST /api/topic/reports/{report_id}/refine 호출 검증
+    refine_payload = {
+        "feedback": {
+            "defects": review["defects"],
+            "actionable_suggestions": review["actionable_suggestions"]
+        }
+    }
+    res_refine = client.post(f"/api/topic/reports/{report_id}/refine", json=refine_payload)
+    assert res_refine.status_code == 200
+    refine_data = res_refine.json()
+    assert refine_data["id"] == report_id
+    assert refine_data["status"] == "completed"
+
+    # In-place 갱신 디스크 파일 확인
+    report_file = reports_dir / f"{report_id}.md"
+    assert report_file.exists()
+    file_content = report_file.read_text(encoding="utf-8")
+    assert "✨ AI 리뷰어 피드백 반영 보정 완료" in file_content
+    assert "보정된 AI 반도체 개요입니다." in file_content

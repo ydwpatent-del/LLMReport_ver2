@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.config import Settings, get_settings
 from app.topic_generator import TopicReportGenerator
+from app.report_reviewer import ReportReviewAgent
 
 logger = logging.getLogger("TopicRouter")
 
@@ -17,6 +18,10 @@ topic_router = APIRouter(prefix="/api/topic", tags=["Topic Reports"])
 class TopicGenerateRequest(BaseModel):
     """보고서 생성 요청 DTO."""
     topic: str
+
+class TopicRefineRequest(BaseModel):
+    """보고서 보정 요청 DTO."""
+    feedback: dict
 
 class TopicReportItemResponse(BaseModel):
     """보고서 목록 항목 DTO."""
@@ -31,14 +36,22 @@ class TopicReportItemResponse(BaseModel):
     is_synthesized: bool = True
 
 _generator_cache: Optional[TopicReportGenerator] = None
+_reviewer_cache: Optional[ReportReviewAgent] = None
 
 def get_generator(settings: Settings = Depends(get_settings)) -> TopicReportGenerator:
-    """TopicReportGenerator 의존성 주입 프로바이더 (매 요청 재생성 방지)."""
+    """TopicReportGenerator 의존성 주입 프로바이더 (설정 변경 대응)."""
     global _generator_cache
-    if _generator_cache is None:
-        reports_dir = settings.wiki_db_dir / "reports"
-        _generator_cache = TopicReportGenerator(reports_dir=reports_dir)
+    expected_reports_dir = settings.wiki_db_dir / "reports"
+    if _generator_cache is None or _generator_cache.reports_dir.resolve() != expected_reports_dir.resolve():
+        _generator_cache = TopicReportGenerator(reports_dir=expected_reports_dir)
     return _generator_cache
+
+def get_reviewer() -> ReportReviewAgent:
+    """ReportReviewAgent 의존성 주입 프로바이더."""
+    global _reviewer_cache
+    if _reviewer_cache is None:
+        _reviewer_cache = ReportReviewAgent()
+    return _reviewer_cache
 
 @topic_router.post("/generate")
 async def generate_topic_report(
@@ -107,3 +120,62 @@ async def get_topic_report_detail(
     if not report:
         raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
     return report
+
+@topic_router.delete("/reports/{report_id}")
+async def delete_topic_report_endpoint(
+    report_id: str,
+    generator: TopicReportGenerator = Depends(get_generator)
+):
+    """특정 AI 생성 보고서를 삭제한다."""
+    success = generator.delete_report(report_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
+    return {"message": "보고서가 성공적으로 삭제되었습니다.", "deleted_id": report_id}
+
+@topic_router.post("/reports/{report_id}/review")
+async def review_topic_report_endpoint(
+    report_id: str,
+    generator: TopicReportGenerator = Depends(get_generator),
+    reviewer: ReportReviewAgent = Depends(get_reviewer)
+):
+    """특정 AI 생성 보고서의 품질 및 정합성을 5대 기준에 따라 검수하고 결과를 반환한다."""
+    report = generator.get_report_detail(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
+
+    try:
+        review_result = reviewer.review_report(
+            report_markdown=report["content"],
+            topic=report.get("topic", report_id)
+        )
+        return {"report_id": report_id, "review": review_result}
+    except Exception as e:
+        logger.exception(f"보고서 검수 중 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"보고서 검수 중 오류가 발생했습니다: {str(e)}")
+
+@topic_router.post("/reports/{report_id}/refine", response_model=TopicReportItemResponse)
+async def refine_topic_report_endpoint(
+    report_id: str,
+    req: TopicRefineRequest,
+    generator: TopicReportGenerator = Depends(get_generator)
+):
+    """검수 피드백을 기반으로 보고서를 보정하여 갱신하고 결과를 반환한다."""
+    existing = generator.get_report_detail(report_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
+
+    try:
+        generator.refine_report(report_id=report_id, feedback=req.feedback)
+    except RuntimeError as e:
+        logger.exception(f"보고서 보정 실행 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception(f"보고서 보정 중 예기치 못한 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"보고서 보정 중 오류가 발생했습니다: {str(e)}")
+
+    updated_detail = generator.get_report_detail(report_id)
+    if not updated_detail:
+        raise HTTPException(status_code=500, detail="보정된 보고서 메타데이터 조회에 실패했습니다.")
+    return updated_detail
+
+
