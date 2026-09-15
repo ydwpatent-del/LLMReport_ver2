@@ -149,3 +149,260 @@ def test_generate_report_uses_only_valid_model_names():
     assert "gemini-3.6-flash" not in source, \
         "gemini-3.6-flash는 존재하지 않는 모델명입니다. 유효한 모델명으로 교체하세요."
 
+
+def test_delete_topic_report(tmp_path):
+    """AI 보고서 삭제(delete_report) 및 DELETE API 엔드포인트 검증."""
+    from fastapi.testclient import TestClient
+    from app.server import create_app
+    from app.config import Settings
+
+    reports_dir = tmp_path / "reports"
+    docs_dir = tmp_path / "docs"
+    assets_dir = tmp_path / "assets"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    generator = TopicReportGenerator(reports_dir=reports_dir, api_key="dummy_key")
+    report_info = generator.save_report(
+        topic="테스트주제",
+        markdown="# 테스트 보고서\n본문 내용",
+        sources=[]
+    )
+    report_id = report_info["id"]
+    report_file = reports_dir / f"{report_id}.md"
+    assert report_file.exists()
+
+    # 1. TopicReportGenerator.delete_report 검증
+    del_res = generator.delete_report(report_id)
+    assert del_res is True
+    assert not report_file.exists()
+
+    # 다시 삭제 시 False 반환
+    assert generator.delete_report(report_id) is False
+
+    # 2. FastAPI DELETE 엔드포인트 검증 (/api/topic/reports/{report_id} 및 /api/documents/{report_id})
+    report_info2 = generator.save_report(
+        topic="테스트주제2",
+        markdown="# 테스트 보고서 2\n본문 내용",
+        sources=[]
+    )
+    report_id2 = report_info2["id"]
+    report_file2 = reports_dir / f"{report_id2}.md"
+    assert report_file2.exists()
+
+    custom_settings = Settings(
+        source_dir=tmp_path / "Source",
+        wiki_db_dir=tmp_path,
+        docs_dir=docs_dir,
+        assets_dir=assets_dir,
+        manifest_path=tmp_path / "manifest.json"
+    )
+    app = create_app(settings=custom_settings)
+    client = TestClient(app)
+
+    # 2-1. DELETE /api/topic/reports/{report_id}
+    res = client.delete(f"/api/topic/reports/{report_id2}")
+    assert res.status_code == 200
+    assert not report_file2.exists()
+
+    # 2-2. DELETE /api/documents/{report_id} 에서도 AI 보고서 삭제 지원 검증
+    report_info3 = generator.save_report(
+        topic="테스트주제3",
+        markdown="# 테스트 보고서 3\n본문 내용",
+        sources=[]
+    )
+    report_id3 = report_info3["id"]
+    report_file3 = reports_dir / f"{report_id3}.md"
+    assert report_file3.exists()
+
+    res3 = client.delete(f"/api/documents/{report_id3}")
+    assert res3.status_code == 200
+    assert not report_file3.exists()
+
+
+def test_build_prompt_quality_guidelines(tmp_path):
+    """보고서 생성 프롬프트의 5대 목차, 필수 비교 표, 정량 데이터 원칙 검증."""
+    generator = TopicReportGenerator(reports_dir=tmp_path / "reports", api_key="dummy_key")
+    matched_docs = [
+        {
+            "doc_id": "test_doc_1",
+            "title": "차세대 반도체 패키징",
+            "score": 10.0,
+            "sections": [
+                SectionChunk(
+                    doc_id="test_doc_1",
+                    doc_title="차세대 반도체 패키징",
+                    heading="기술 개요",
+                    level=2,
+                    text="반도체 미세화의 물리적 한계를 극복하기 위한 패키징 기술입니다.",
+                    images=[],
+                    tables=[],
+                    category="overview"
+                ),
+                SectionChunk(
+                    doc_id="test_doc_1",
+                    doc_title="차세대 반도체 패키징",
+                    heading="시장 규모",
+                    level=2,
+                    text="2025년 시장 규모는 100억 달러에서 2030년 300억 달러로 CAGR 24% 성장이 예상됩니다.",
+                    images=[],
+                    tables=["| 연도 | 시장규모(억 달러) |\n|---|---|\n| 2025 | 100 |\n| 2030 | 300 |"],
+                    category="market"
+                )
+            ]
+        }
+    ]
+
+    prompt = generator._build_prompt("차세대 패키징", matched_docs)
+
+    # 1. 5대 목차 존재 확인
+    assert "## 1. 기술개요" in prompt
+    assert "## 2. 기술동향" in prompt
+    assert "## 3. 시장동향 (국내/세계시장 규모 데이터)" in prompt
+    assert "## 4. 주요업체" in prompt
+    assert "## 5. 데이터 출처" in prompt
+
+    # 2. 필수 표(Markdown Table) 작성 지침 포함 확인
+    assert "핵심 기술 방식 비교 요약 표(Markdown Table)" in prompt
+    assert "시장 규모 및 전망 데이터 표(Markdown Table)" in prompt
+    assert "주요 기업별 기술 및 개발 현황 비교 표(Markdown Table)" in prompt
+
+    # 3. 정량 데이터 및 AI 상투어 차단 규칙 확인
+    assert "정량적 팩트 중심 서술" in prompt
+    assert "인공지능 상투어 차단" in prompt
+    assert "일관된 전문 보고서 문체" in prompt
+
+    # 4. 출처 링크 및 이미지 인용 형식 포함 확인
+    assert "<출처: [{문서제목}](/api/documents/{문서ID})>" in prompt
+    assert "![" in prompt
+
+
+def test_deduplicate_citations_in_report():
+    """보고서 본문 및 5번 데이터 출처 섹션에서 괄호/공백 차이의 동일 문헌 출처가 단일화되는지 검증한다."""
+    from app.topic_generator import TopicReportGenerator
+
+    sample_md = """# HBF 종합 기술 보고서
+
+한미반도체는 차세대 TC 본더를 개발 중입니다 <출처: [HBF 산업분석보고서 (Growth Research)](/api/documents/doc_1)>, <출처: [HBF 산업분석보고서 Growth Research](/api/documents/doc_2)>.
+
+SK하이닉스는 HBF 공정을 선도합니다 <출처: [HBF 산업분석보고서 (Growth Research)](/api/documents/doc_1)>, <출처: [LS증권_피지컬AI](/api/documents/doc_3)>.
+
+## 5. 데이터 출처
+
+- [HBF 산업분석보고서 (Growth Research)](/api/documents/doc_1)
+- [HBF 산업분석보고서 Growth Research](/api/documents/doc_2)
+- [LS증권_피지컬AI](/api/documents/doc_3)
+"""
+
+    cleaned = TopicReportGenerator.deduplicate_citations(sample_md)
+
+    # 본문 연속 중복 출처 단일화 검증
+    assert "<출처: [HBF 산업분석보고서 (Growth Research)](/api/documents/doc_1)>." in cleaned
+    assert "<출처: [HBF 산업분석보고서 Growth Research](/api/documents/doc_2)>" not in cleaned
+
+    # 서로 다른 문헌은 정상 유지
+    assert "<출처: [HBF 산업분석보고서 (Growth Research)](/api/documents/doc_1)>, <출처: [LS증권_피지컬AI](/api/documents/doc_3)>" in cleaned
+
+    # 5번 데이터 출처 섹션 내 중복 bullet 제거 검증
+    assert cleaned.count("[HBF 산업분석보고서 (Growth Research)]") == 3  # 본문 2 + 5번 섹션 1
+    assert cleaned.count("[HBF 산업분석보고서 Growth Research]") == 0
+    assert "- [LS증권_피지컬AI](/api/documents/doc_3)" in cleaned
+
+
+def test_search_relevant_sections_deduplication(tmp_path):
+    """동일한 해시(SHA-256)를 가진 마크다운 파일이 여러 개 존재해도 검색 결과에는 1개만 포함되어야 한다."""
+    from app.topic_search import search_relevant_sections
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    header_template = """# HBF 산업분석보고서
+> - **원본 파일명**: HBF_보고서.pdf
+> - **무결성 해시 (SHA-256)**: `463e1da9a82e296f412a2f5a5a0e169b983126c1b664759d8703992928cd0c9b`
+
+## 기술 개요
+HBF는 차세대 고대역폭 플래시 메모리 기술입니다.
+"""
+
+    # 동일 파일 해시를 가진 서로 다른 두 파일 생성
+    (docs_dir / "HBF_doc_old_1788000000_aaaa1111.md").write_text(header_template, encoding="utf-8")
+    (docs_dir / "HBF_doc_new_1789000000_bbbb2222.md").write_text(header_template + "\n추가 본문 내용", encoding="utf-8")
+
+    matched = search_relevant_sections("HBF", docs_dir, top_k=5)
+
+    # 2개 파일이 아닌 1개 문서만 매칭되어야 함
+    assert len(matched) == 1
+    assert matched[0]["doc_id"] in ["HBF_doc_old_1788000000_aaaa1111", "HBF_doc_new_1789000000_bbbb2222"]
+
+
+def test_refine_report_in_place(tmp_path):
+    """피드백 반영 보정 시 In-place 덮어쓰기 저장 및 점수 메타데이터 제외 검증."""
+    reports_dir = tmp_path / "reports"
+    generator = TopicReportGenerator(reports_dir=reports_dir, api_key="dummy_key")
+
+    initial_md = """# 테스트 보고서
+> - **문서분류**: 🤖 AI 생성 주제 보고서
+> - **주제어**: 전고체 배터리
+
+## 1. 기술개요
+초안 내용입니다.
+"""
+    report_info = generator.save_report(topic="전고체 배터리", markdown=initial_md, sources=[])
+    report_id = report_info["id"]
+    file_path = Path(report_info["file_path"])
+    assert file_path.exists()
+
+    # 모의 LLM 보정 응답 주입 테스트를 위해 generator.client mock 처리
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = """# 전고체 배터리 종합 기술 및 시장 분석 보고서
+> - **문서분류**: 🤖 AI 생성 주제 보고서 (Synthesized Report)
+> - **주제어**: 전고체 배터리
+> - **검수 상태**: ✨ AI 리뷰어 피드백 반영 보정 완료
+
+---
+
+## 1. 기술개요
+보정된 완성도 높은 개요입니다.
+
+## 2. 기술동향
+| 방식 | 특징 |
+|---|---|
+| 황화물계 | 고이온전도도 |
+
+## 3. 시장동향 (국내/세계시장 규모 데이터)
+2030년 100억 달러 CAGR 30% 성장.
+
+| 연도 | 규모 |
+|---|---|
+| 2030 | 100억 달러 |
+
+## 4. 주요업체
+삼성SDI, 도요타
+
+## 5. 데이터 출처
+- [출처1](/api/documents/doc1)
+"""
+    mock_client.models.generate_content.return_value = mock_response
+    generator.client = mock_client
+
+    feedback = {
+        "defects": ["표 누락", "시장 수치 부족"],
+        "actionable_suggestions": ["비교 표 추가", "2030년 100억 달러 수치 추가"]
+    }
+
+    refined_info = generator.refine_report(report_id=report_id, feedback=feedback)
+
+    # 1. In-place 덮어쓰기 검증: 동일한 ID 및 동일 파일 경로
+    assert refined_info["id"] == report_id
+    assert Path(refined_info["file_path"]) == file_path
+    updated_content = file_path.read_text(encoding="utf-8")
+    assert "✨ AI 리뷰어 피드백 반영 보정 완료" in updated_content
+    # 2. 점수(XX점) 메타데이터 배제 검증
+    assert "점수" not in updated_content
+    assert "Score" not in updated_content
+
+
+
+
