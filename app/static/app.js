@@ -30,6 +30,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleRawBtn = document.getElementById('toggleRawBtn');
   const copyMdBtn = document.getElementById('copyMdBtn');
   const deleteDocHeaderBtn = document.getElementById('deleteDocHeaderBtn');
+  const auditDocBtn = document.getElementById('auditDocBtn');
+  const auditIcon = document.getElementById('auditIcon');
   const tocContainer = document.getElementById('tocContainer');
 
   const imageModal = document.getElementById('imageModal');
@@ -38,9 +40,70 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeModalBtn = document.getElementById('closeModalBtn');
   const toastContainer = document.getElementById('toastContainer');
 
+  // 품질 검수 및 자율 치유 모달 DOM 요소
+  const auditModal = document.getElementById('auditModal');
+  const closeAuditModalBtn = document.getElementById('closeAuditModalBtn');
+  const closeAuditModalBottomBtn = document.getElementById('closeAuditModalBottomBtn');
+  const executeHealBtn = document.getElementById('executeHealBtn');
+  const healBtnText = document.getElementById('healBtnText');
+  const auditModalTitle = document.getElementById('auditModalTitle');
+  const auditModalDocName = document.getElementById('auditModalDocName');
+  const auditModalBody = document.getElementById('auditModalBody');
+  const auditModalIconBg = document.getElementById('auditModalIconBg');
+
+  // Marked.js 마크다운 줄바꿈(breaks) 및 GFM 활성화 (불릿/텍스트 뭉침 방지)
+  if (window.marked && typeof window.marked.use === 'function') {
+    window.marked.use({ breaks: true, gfm: true });
+  }
+
+  // 탭 및 보고서 생성기 관련 DOM 요소
+  const tabBtnViewer = document.getElementById('tabBtnViewer');
+  const tabBtnGenerator = document.getElementById('tabBtnGenerator');
+  const viewerTabContent = document.getElementById('viewerTabContent');
+  const generatorTabContent = document.getElementById('generatorTabContent');
+
+  const topicInput = document.getElementById('topicInput');
+  const btnGenerateTopic = document.getElementById('btnGenerateTopic');
+  const genIcon = document.getElementById('genIcon');
+  const genBtnText = document.getElementById('genBtnText');
+  const topicSuggestionsBar = document.getElementById('topicSuggestionsBar');
+  const topicEmptyState = document.getElementById('topicEmptyState');
+  const topicLoadingState = document.getElementById('topicLoadingState');
+  const loadingStageTitle = document.getElementById('loadingStageTitle');
+  const loadingStageDesc = document.getElementById('loadingStageDesc');
+  const loadingProgressBar = document.getElementById('loadingProgressBar');
+  const topicReportViewer = document.getElementById('topicReportViewer');
+  const reportTitleHeading = document.getElementById('reportTitleHeading');
+  const reportDateBadge = document.getElementById('reportDateBadge');
+  const topicRenderedContent = document.getElementById('topicRenderedContent');
+  const copyGenMdBtn = document.getElementById('copyGenMdBtn');
+  const downloadGenMdBtn = document.getElementById('downloadGenMdBtn');
+  const topicHistoryList = document.getElementById('topicHistoryList');
+  const reportCountBadge = document.getElementById('reportCountBadge');
+
+  // 보고서 품질 검수 및 피드백 반영 모달 DOM 요소
+  const btnReviewReport = document.getElementById('btnReviewReport');
+  const reviewIcon = document.getElementById('reviewIcon');
+  const btnReviewReportText = document.getElementById('btnReviewReportText');
+  const reportReviewModal = document.getElementById('reportReviewModal');
+  const reviewModalReportTitle = document.getElementById('reviewModalReportTitle');
+  const btnCloseReviewModal = document.getElementById('btnCloseReviewModal');
+  const btnCloseReviewModal2 = document.getElementById('btnCloseReviewModal2');
+  const reviewChecklistContainer = document.getElementById('reviewChecklistContainer');
+  const reviewDefectsList = document.getElementById('reviewDefectsList');
+  const reviewSuggestionsList = document.getElementById('reviewSuggestionsList');
+  const reviewDefectsSection = document.getElementById('reviewDefectsSection');
+  const reviewSuggestionsSection = document.getElementById('reviewSuggestionsSection');
+  const btnApplyRefine = document.getElementById('btnApplyRefine');
+  const refineIcon = document.getElementById('refineIcon');
+  const refineBtnText = document.getElementById('refineBtnText');
+
   // 상태 변수
   let documents = [];
   let currentDoc = null;
+  let currentTopicReport = null;
+  let currentActiveTopicReportId = null;
+  let lastReviewResult = null;
   let isRawView = false;
   let isInitialLoad = true;
 
@@ -98,12 +161,20 @@ document.addEventListener('DOMContentLoaded', () => {
   if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', () => toggleMobileMenu(true));
   if (mobileOverlay) mobileOverlay.addEventListener('click', () => toggleMobileMenu(false));
 
-  // 4. 문서 목록 가져오기 및 렌더링
+  // 4. 문서 목록 가져오기 및 렌더링 (원본 문서 + AI 생성 보고서 안전 병합)
   async function fetchDocuments(selectId = null) {
     try {
-      const res = await fetch('/api/documents');
-      if (!res.ok) throw new Error('문서 목록 조회 실패');
-      documents = await res.json();
+      const [resDocs, resReports] = await Promise.all([
+        fetch('/api/documents'),
+        fetch('/api/topic/reports').catch(() => null)
+      ]);
+
+      if (!resDocs.ok) throw new Error('문서 목록 조회 실패');
+      const originDocs = await resDocs.json();
+      const reportDocs = (resReports && resReports.ok) ? await resReports.json() : [];
+
+      // AI 생성 보고서는 최신순으로 상단에 배치하고 원본과 결합
+      documents = [...reportDocs, ...originDocs];
       renderDocumentList();
 
       if (selectId) {
@@ -111,11 +182,9 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (currentDoc) {
         const stillExists = documents.find(d => d.id === currentDoc.id);
         if (stillExists) {
-          // 메타데이터만 갱신하거나 내용 유지
           currentDoc = stillExists;
         }
       } else if (isInitialLoad && documents.length > 0) {
-        // 첫 진입 시 첫 번째 문서 자동 로드
         isInitialLoad = false;
         await loadDocument(documents[0].id);
       }
@@ -146,10 +215,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     docListContainer.innerHTML = filtered.map(doc => {
       const isSelected = currentDoc && currentDoc.id === doc.id;
+      const isSynthesized = doc.is_synthesized || doc.id.startsWith('REPORT_');
       const ext = (doc.original_filename || '').split('.').pop().toUpperCase() || 'DOC';
       
+      let badgeType = '';
+      if (isSynthesized) {
+        badgeType = '<span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-500/40 flex items-center gap-1"><i class="fa-solid fa-robot text-[9px]"></i> AI 보고서</span>';
+      } else {
+        badgeType = `<span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">${ext}</span>`;
+      }
+
       let statusBadge = '';
-      if (doc.status === 'completed') {
+      if (isSynthesized) {
+        statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-purple-500/20 text-purple-300 border-purple-500/30">합성완료</span>';
+      } else if (doc.status === 'completed') {
         statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">완본</span>';
       } else if (doc.status === 'processing') {
         statusBadge = '<span class="text-[10px] px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/30 flex items-center gap-1"><i class="fa-solid fa-spinner animate-spin text-[9px]"></i> AI 변환 중</span>';
@@ -164,9 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-700/50 hover:border-slate-600'
         }" data-id="${doc.id}">
           <div class="flex items-start justify-between gap-2 mb-1">
-            <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">
-              ${ext}
-            </span>
+            ${badgeType}
             <div class="flex items-center gap-1.5">
               ${statusBadge}
               <button class="delete-doc-btn opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded transition" title="문서 및 에셋 전체 삭제" data-id="${doc.id}" data-title="${doc.title || doc.original_filename}">
@@ -203,7 +280,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const docId = btn.getAttribute('data-id');
         const title = btn.getAttribute('data-title') || '해당 문서';
         
-        if (!confirm(`정말로 '${title}' 문서를 삭제하시겠습니까?\n\nWikiDB의 마크다운 파일 및 추출된 모든 이미지 에셋이 영구 삭제됩니다.`)) {
+        if (!confirm(`정말로 '${title}' 문서를 삭제하시겠습니까?\n\n마크다운 파일 및 관련 에셋이 삭제됩니다.`)) {
           return;
         }
 
@@ -216,26 +293,41 @@ document.addEventListener('DOMContentLoaded', () => {
   async function deleteDocument(docId) {
     try {
       showToast('문서 및 에셋을 삭제하는 중...', 'info');
-      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, {
-        method: 'DELETE'
-      });
+      let res = null;
+      if (docId.startsWith('REPORT_')) {
+        res = await fetch(`/api/topic/reports/${encodeURIComponent(docId)}`, {
+          method: 'DELETE'
+        });
+      }
+      if (!res || !res.ok) {
+        res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, {
+          method: 'DELETE'
+        });
+      }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `삭제 실패 (${res.status})`);
       }
 
-      showToast('문서와 관련 에셋이 완전히 삭제되었습니다.', 'success');
+      showToast('문서가 삭제되었습니다.', 'success');
 
-      // 현재 보고 있던 문서가 삭제된 경우 뷰어 초기화
       if (currentDoc && (currentDoc.id === docId || currentDoc.id === decodeURIComponent(docId))) {
         currentDoc = null;
         if (documentViewer) documentViewer.classList.add('hidden');
         if (emptyView) emptyView.classList.remove('hidden');
       }
 
-      // 목록 새로고침
+      if (currentTopicReport && (currentTopicReport.id === docId || currentTopicReport.id === decodeURIComponent(docId))) {
+        currentTopicReport = null;
+        if (topicReportViewer) topicReportViewer.classList.add('hidden');
+        if (topicEmptyState) topicEmptyState.classList.remove('hidden');
+      }
+
       await fetchDocuments();
+      if (typeof loadTopicHistory === 'function') {
+        loadTopicHistory();
+      }
     } catch (err) {
       console.error('문서 삭제 오류:', err);
       showToast(`삭제 실패: ${err.message}`, 'error');
@@ -246,7 +338,13 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadDocument(docId) {
     try {
       console.log('[Wiki] Loading document:', docId);
-      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`);
+      let res = null;
+      if (docId.startsWith('REPORT_')) {
+        res = await fetch(`/api/topic/reports/${encodeURIComponent(docId)}`);
+      }
+      if (!res || !res.ok) {
+        res = await fetch(`/api/documents/${encodeURIComponent(docId)}`);
+      }
       if (!res.ok) throw new Error(`문서 상세 조회 실패 (${res.status})`);
       currentDoc = await res.json();
 
@@ -254,8 +352,19 @@ document.addEventListener('DOMContentLoaded', () => {
       if (documentViewer) documentViewer.classList.remove('hidden');
 
       // 메타데이터 렌더링
+      const isSynthesized = currentDoc.is_synthesized || currentDoc.id.startsWith('REPORT_');
+      if (isSynthesized) {
+        currentActiveTopicReportId = currentDoc.id || docId;
+      }
       const ext = (currentDoc.original_filename || '').split('.').pop().toUpperCase() || 'DOC';
-      if (docFormatBadge) docFormatBadge.textContent = ext;
+      if (docFormatBadge) {
+        docFormatBadge.textContent = isSynthesized ? '🤖 AI 보고서' : ext;
+        if (isSynthesized) {
+          docFormatBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-purple-900/60 text-purple-300 border border-purple-500/30';
+        } else {
+          docFormatBadge.className = 'text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 border border-brand-500/30';
+        }
+      }
       if (docTitleHeading) docTitleHeading.textContent = currentDoc.title || currentDoc.original_filename;
       if (docDateText) {
         docDateText.textContent = currentDoc.ingested_at ? new Date(currentDoc.ingested_at).toLocaleString('ko-KR') : '';
@@ -299,6 +408,37 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
+      // 본문 내용이 비어 있는 경우 자가 치유 안내
+      if (!currentDoc.content || currentDoc.content.trim() === '') {
+        if (renderedContent) {
+          renderedContent.innerHTML = `
+            <div class="flex flex-col items-center justify-center p-12 text-center my-12 bg-slate-800/40 rounded-2xl border border-slate-700/60">
+              <div class="w-12 h-12 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center mb-3 text-amber-400">
+                <i class="fa-solid fa-triangle-exclamation text-xl"></i>
+              </div>
+              <h3 class="text-sm font-bold text-white mb-1">마크다운 본문을 표시할 수 없습니다</h3>
+              <p class="text-xs text-slate-400 max-w-md leading-relaxed mb-4">
+                디스크 파일 경로 불일치 또는 동기화 지연일 수 있습니다. 아래 버튼을 눌러 WikiDB를 즉시 동기화하십시오.
+              </p>
+              <button id="reconcileFixBtn" class="px-3.5 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold shadow transition flex items-center gap-1.5">
+                <i class="fa-solid fa-arrows-rotate"></i> WikiDB 자가 치유 동기화
+              </button>
+            </div>
+          `;
+          const fixBtn = document.getElementById('reconcileFixBtn');
+          if (fixBtn) {
+            fixBtn.addEventListener('click', async () => {
+              showToast('WikiDB 자가 치유 동기화 중...', 'info');
+              await fetch('/api/reconcile', { method: 'POST' });
+              await fetchDocuments(currentDoc.id);
+            });
+          }
+        }
+        if (tocContainer) tocContainer.innerHTML = '<p class="text-[11px] text-slate-500 italic">헤딩이 없습니다.</p>';
+        renderDocumentList();
+        return;
+      }
+
       // 마크다운 렌더링 실행
       await renderMarkdownContent(currentDoc.content || '');
       renderDocumentList();
@@ -314,13 +454,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       let html = '';
+      const normalizedContent = content ? content.replace(/<출처\s*:\s*\[([^\]]+)\]\(([^)]+)\)>/g, '[$1]($2)') : '';
 
       // 1. Marked.js 파싱 시도
       if (window.marked) {
+        if (typeof window.marked.use === 'function') {
+          window.marked.use({ breaks: true, gfm: true });
+        }
         if (typeof window.marked.parse === 'function') {
-          html = await Promise.resolve(window.marked.parse(content));
+          html = await Promise.resolve(window.marked.parse(normalizedContent));
         } else if (typeof window.marked === 'function') {
-          html = await Promise.resolve(window.marked(content));
+          html = await Promise.resolve(window.marked(normalizedContent));
         }
       }
 
@@ -430,11 +574,22 @@ document.addEventListener('DOMContentLoaded', () => {
             });
           } catch (e) {}
         }
+
+        // [출처 링크 시각적 알약 배지화]
+        renderedContent.querySelectorAll('a').forEach(link => {
+          const href = link.getAttribute('href') || '';
+          const text = link.textContent.trim();
+          if (href.startsWith('/api/documents/') || text.includes('출처')) {
+            link.className = 'source-badge';
+            let cleanText = text.replace(/^[<\[\s]*출처\s*:\s*/, '').replace(/[>\]\s]*$/, '');
+            link.innerHTML = `<i class="fa-solid fa-bookmark text-amber-400 mr-1"></i><span>&lt;출처 : <span class="font-semibold text-indigo-100 underline decoration-indigo-400/50">${cleanText || '원본 문서'}</span>&gt;</span>`;
+          }
+        });
       }
     } catch (err) {
       console.error('마크다운 렌더링 에러:', err);
       if (renderedContent) {
-        renderedContent.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${mdContent}</pre>`;
+        renderedContent.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-slate-300 font-mono">${content}</pre>`;
       }
     }
 
@@ -515,6 +670,197 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // 9.8 개별 문서 무결성 및 품질 검수 버튼
+  if (auditDocBtn) {
+    auditDocBtn.addEventListener('click', async () => {
+      if (!currentDoc) {
+        showToast('선택된 문서가 없습니다.', 'warning');
+        return;
+      }
+
+      if (auditIcon) auditIcon.className = 'fa-solid fa-spinner fa-spin';
+      auditDocBtn.disabled = true;
+
+      try {
+        showToast('문서 무결성 및 품질 검수 중...', 'info');
+        const res = await fetch(`/api/documents/${encodeURIComponent(currentDoc.id)}/audit`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `검수 실패 (${res.status})`);
+        }
+
+        const report = await res.json();
+        showAuditModal(report);
+      } catch (err) {
+        console.error('품질 검수 오류:', err);
+        showToast(`품질 검수 오류: ${err.message}`, 'error');
+      } finally {
+        if (auditIcon) auditIcon.className = 'fa-solid fa-shield-halved';
+        auditDocBtn.disabled = false;
+      }
+    });
+  }
+
+  // 품질 검수 결과 모달 렌더링 함수
+  function showAuditModal(report) {
+    if (!auditModal) return;
+
+    if (auditModalDocName) {
+      auditModalDocName.textContent = currentDoc.title || currentDoc.original_filename;
+    }
+
+    const isHealthy = report.is_healthy;
+
+    if (auditModalIconBg) {
+      if (isHealthy) {
+        auditModalIconBg.className = 'w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center';
+        auditModalIconBg.innerHTML = '<i class="fa-solid fa-circle-check text-base"></i>';
+      } else {
+        auditModalIconBg.className = 'w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center';
+        auditModalIconBg.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-base"></i>';
+      }
+    }
+
+    if (auditModalTitle) {
+      auditModalTitle.textContent = isHealthy ? '품질 검수 통과 (무결성 100%)' : '품질 결함 감지 (보정 필요)';
+    }
+
+    let html = '';
+    if (isHealthy) {
+      html = `
+        <div class="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs leading-relaxed space-y-2">
+          <div class="font-bold flex items-center gap-1.5 text-emerald-400 text-sm">
+            <i class="fa-solid fa-check"></i> 모든 품질 기준 합격
+          </div>
+          <p>kordoc-wiki-ingest 5대 원칙(무삭제, 불릿 계층, 수식, 표, 인라인 이미지)에 완벽히 부합하며 누락된 단락이나 서식 결함이 없습니다.</p>
+          <div class="text-[11px] text-emerald-400/80 pt-1 border-t border-emerald-500/20">
+            검사 페이지: ${report.inspected_pages || 'N/A'}p | 발견된 결함: 0건
+          </div>
+        </div>
+      `;
+      if (executeHealBtn) executeHealBtn.classList.add('hidden');
+    } else {
+      const redFlags = report.red_flags || [];
+      const missingSecs = report.missing_sections || [];
+      const missingTables = report.missing_tables || [];
+      const totalIssues = (report.issues || []).length + redFlags.length;
+
+      html = `
+        <div class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-2">
+          <div class="font-bold flex items-center gap-1.5 text-amber-400 text-sm">
+            <i class="fa-solid fa-circle-exclamation"></i> 총 ${totalIssues}건의 보정 대상 결함 발견
+          </div>
+          <p class="text-slate-300">원문 대조 검사 결과 누락 단락 또는 서식 규격 미달이 감지되었습니다. 아래 [자율 치유 실행] 버튼을 누르면 원클릭으로 자동 보정됩니다.</p>
+        </div>
+
+        <div class="space-y-2">
+          <h4 class="text-xs font-semibold text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-list-check text-slate-400"></i> 세부 결함 내역
+          </h4>
+          <div class="max-h-48 overflow-y-auto space-y-1.5 pr-1 text-xs">
+      `;
+
+      if (redFlags.length > 0) {
+        redFlags.forEach(rf => {
+          html += `
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-700/80 text-rose-300 flex items-start gap-2">
+              <i class="fa-solid fa-flag text-rose-400 mt-0.5 shrink-0 text-[10px]"></i>
+              <span class="break-words">${rf}</span>
+            </div>
+          `;
+        });
+      }
+
+      if (missingSecs.length > 0) {
+        missingSecs.slice(0, 5).forEach(sec => {
+          html += `
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-700/80 text-amber-200/90 flex items-start gap-2">
+              <i class="fa-solid fa-file-circle-xmark text-amber-400 mt-0.5 shrink-0 text-[10px]"></i>
+              <span class="break-words">원문 단락 누락: ${sec}</span>
+            </div>
+          `;
+        });
+        if (missingSecs.length > 5) {
+          html += `<div class="text-[11px] text-slate-400 pl-2">...외 ${missingSecs.length - 5}건 단락 누락</div>`;
+        }
+      }
+
+      if (missingTables.length > 0) {
+        missingTables.slice(0, 5).forEach(tbl => {
+          html += `
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-700/80 text-cyan-200/90 flex items-start gap-2">
+              <i class="fa-solid fa-table text-cyan-400 mt-0.5 shrink-0 text-[10px]"></i>
+              <span class="break-words">원문 표 누락: ${tbl}</span>
+            </div>
+          `;
+        });
+      }
+
+      html += `
+          </div>
+        </div>
+      `;
+
+      if (executeHealBtn) {
+        executeHealBtn.classList.remove('hidden');
+        if (healBtnText) healBtnText.textContent = '자율 치유 실행';
+        executeHealBtn.disabled = false;
+      }
+    }
+
+    if (auditModalBody) auditModalBody.innerHTML = html;
+    auditModal.classList.remove('hidden');
+  }
+
+  // 자율 치유 실행 버튼
+  if (executeHealBtn) {
+    executeHealBtn.addEventListener('click', async () => {
+      if (!currentDoc) return;
+
+      if (healBtnText) healBtnText.textContent = '치유 작업 중...';
+      executeHealBtn.disabled = true;
+
+      try {
+        showToast('자율 치유를 진행하고 있습니다. 잠시만 기다려주십시오...', 'info');
+        const res = await fetch(`/api/documents/${encodeURIComponent(currentDoc.id)}/heal`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `치유 실패 (${res.status})`);
+        }
+
+        const data = await res.json();
+        showToast(data.message || '자율 치유가 완료되었습니다.', 'success');
+
+        if (auditModal) auditModal.classList.add('hidden');
+
+        // 최신 치유된 문서 본문 즉시 재로드
+        await loadDocument(currentDoc.id);
+        await fetchDocuments();
+      } catch (err) {
+        console.error('자율 치유 오류:', err);
+        showToast(`치유 실패: ${err.message}`, 'error');
+      } finally {
+        if (healBtnText) healBtnText.textContent = '자율 치유 실행';
+        executeHealBtn.disabled = false;
+      }
+    });
+  }
+
+  // 품질 검수 모달 닫기 이벤트
+  if (closeAuditModalBtn) closeAuditModalBtn.addEventListener('click', () => auditModal && auditModal.classList.add('hidden'));
+  if (closeAuditModalBottomBtn) closeAuditModalBottomBtn.addEventListener('click', () => auditModal && auditModal.classList.add('hidden'));
+  if (auditModal) {
+    auditModal.addEventListener('click', (e) => {
+      if (e.target === auditModal) auditModal.classList.add('hidden');
+    });
+  }
+
   // 10. 라이트박스 모달 닫기
   if (closeModalBtn) closeModalBtn.addEventListener('click', () => imageModal && imageModal.classList.add('hidden'));
   if (imageModal) {
@@ -576,11 +922,613 @@ document.addEventListener('DOMContentLoaded', () => {
   if (searchInput) searchInput.addEventListener('input', renderDocumentList);
   if (refreshListBtn) refreshListBtn.addEventListener('click', () => fetchDocuments());
 
-  // 14. 주기적 자동 폴링 (5초마다 문서 목록 갱신)
+  // 14. 탭 전환 제어
+  function switchTab(tabName) {
+    if (!tabBtnViewer || !tabBtnGenerator || !viewerTabContent || !generatorTabContent) return;
+
+    if (tabName === 'viewer') {
+      tabBtnViewer.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white shadow-md transition flex items-center gap-1.5 cursor-pointer';
+      tabBtnGenerator.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 transition flex items-center gap-1.5 cursor-pointer';
+      viewerTabContent.classList.remove('hidden');
+      generatorTabContent.classList.add('hidden');
+    } else {
+      tabBtnGenerator.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white shadow-md transition flex items-center gap-1.5 cursor-pointer';
+      tabBtnViewer.className = 'px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 transition flex items-center gap-1.5 cursor-pointer';
+      generatorTabContent.classList.remove('hidden');
+      viewerTabContent.classList.add('hidden');
+      if (topicInput) topicInput.focus();
+    }
+  }
+
+  if (tabBtnViewer) tabBtnViewer.addEventListener('click', () => switchTab('viewer'));
+  if (tabBtnGenerator) tabBtnGenerator.addEventListener('click', () => switchTab('generator'));
+
+  // 15. 추천 키워드 로드
+  async function loadTopicSuggestions() {
+    if (!topicSuggestionsBar) return;
+    try {
+      const res = await fetch('/api/topic/suggestions');
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = data.suggestions || [];
+      if (list.length === 0) return;
+
+      topicSuggestionsBar.innerHTML = list.map(kw => `
+        <button class="suggestion-tag px-2 py-0.5 rounded-md bg-slate-700/70 hover:bg-brand-600/80 hover:text-white text-slate-300 text-[11px] border border-slate-600/60 transition cursor-pointer" data-keyword="${kw}">
+          #${kw}
+        </button>
+      `).join('');
+
+      topicSuggestionsBar.querySelectorAll('.suggestion-tag').forEach(tag => {
+        tag.addEventListener('click', () => {
+          const kw = tag.getAttribute('data-keyword');
+          if (topicInput) {
+            topicInput.value = kw;
+            topicInput.focus();
+          }
+        });
+      });
+    } catch (err) {
+      console.warn('추천 키워드 로드 실패:', err);
+    }
+  }
+
+  // 16. 생성 이력 패널 로드
+  async function loadTopicHistory() {
+    if (!topicHistoryList) return;
+    try {
+      const res = await fetch('/api/topic/reports');
+      if (!res.ok) return;
+      const reports = await res.json();
+      
+      if (reportCountBadge) reportCountBadge.textContent = `${reports.length}건`;
+
+      if (reports.length === 0) {
+        topicHistoryList.innerHTML = `
+          <div class="text-center py-8 text-slate-500 text-xs">
+            <i class="fa-solid fa-clock-rotate-left text-xl mb-1 opacity-40"></i>
+            <p>생성된 보고서가 없습니다.</p>
+          </div>
+        `;
+        return;
+      }
+
+      topicHistoryList.innerHTML = reports.map(rep => {
+        const isSelected = currentTopicReport && currentTopicReport.id === rep.id;
+        return `
+          <div class="history-item p-2.5 rounded-xl border transition cursor-pointer ${
+            isSelected 
+              ? 'bg-purple-900/40 border-purple-500 text-white' 
+              : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-700/50 hover:border-slate-600 text-slate-300'
+          }" data-id="${rep.id}">
+            <div class="flex items-center justify-between text-[10px] text-purple-300 font-semibold mb-1">
+              <span class="truncate"><i class="fa-solid fa-robot mr-1"></i>${rep.topic || '주제'}</span>
+              <span class="text-slate-400 font-normal">${rep.ingested_at ? rep.ingested_at.split(' ')[0] : ''}</span>
+            </div>
+            <h5 class="text-xs font-medium truncate text-slate-100" title="${rep.title}">${rep.title}</h5>
+            <div class="flex items-center justify-between text-[10px] text-slate-500 mt-1">
+              <span>${formatBytes(rep.file_size)}</span>
+              <span class="hover:text-purple-300"><i class="fa-solid fa-chevron-right text-[9px]"></i></span>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      topicHistoryList.querySelectorAll('.history-item').forEach(item => {
+        item.addEventListener('click', async () => {
+          const id = item.getAttribute('data-id');
+          await loadTopicReportDetail(id);
+        });
+      });
+    } catch (err) {
+      console.warn('생성 이력 로드 실패:', err);
+    }
+  }
+
+  // 17. 특정 생성 보고서 불러오기
+  async function loadTopicReportDetail(reportId) {
+    try {
+      showToast('보고서를 불러오는 중...', 'info');
+      const res = await fetch(`/api/topic/reports/${encodeURIComponent(reportId)}`);
+      if (!res.ok) throw new Error('보고서 로드 실패');
+      const data = await res.json();
+      currentTopicReport = data;
+      currentActiveTopicReportId = data.id || reportId;
+
+      if (reportTitleHeading) reportTitleHeading.textContent = data.title;
+      if (reportDateBadge) reportDateBadge.textContent = data.ingested_at || '';
+
+      renderTopicMarkdown(data.content || data.markdown || '');
+
+      if (topicEmptyState) topicEmptyState.classList.add('hidden');
+      if (topicLoadingState) topicLoadingState.classList.add('hidden');
+      if (topicReportViewer) topicReportViewer.classList.remove('hidden');
+
+      loadTopicHistory();
+    } catch (err) {
+      console.error('보고서 로드 오류:', err);
+      showToast(`보고서 로드 실패: ${err.message}`, 'error');
+    }
+  }
+
+  // 18. 보고서 마크다운 렌더링 및 크로스 탭 출처 링크 바인딩
+  function renderTopicMarkdown(mdText) {
+    if (!topicRenderedContent) return;
+
+    // [동일 문헌 출처 태그 사전 중복 병합 방어]
+    let preprocessedMd = mdText || '';
+    preprocessedMd = preprocessedMd.replace(/(?:<출처\s*:\s*\[([^\]]+)\]\(([^)]+)\)>\s*,?\s*)+/g, (full) => {
+      const regex = /<출처\s*:\s*\[([^\]]+)\]\(([^)]+)\)>/g;
+      let match;
+      const seen = new Set();
+      const unique = [];
+      while ((match = regex.exec(full)) !== null) {
+        const title = match[1];
+        const link = match[2];
+        const key = title.replace(/[\s_()\[\]\-\.]+/g, '').toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          unique.push(`<출처: [${title}](${link})>`);
+        }
+      }
+      return unique.join(', ');
+    });
+
+    // 출처 표기 정규화: <출처: [문서명](링크)> -> [문서명](링크)
+    const normalizedMd = preprocessedMd.replace(/<출처\s*:\s*\[([^\]]+)\]\(([^)]+)\)>/g, '[$1]($2)');
+
+    // marked 렌더링
+    if (typeof marked !== 'undefined') {
+      topicRenderedContent.innerHTML = marked.parse(normalizedMd);
+    } else {
+      topicRenderedContent.textContent = normalizedMd;
+    }
+
+    // KaTeX 수식 렌더링
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(topicRenderedContent, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false }
+        ],
+        throwOnError: false
+      });
+    }
+
+    // 코드 하이라이트
+    if (typeof hljs !== 'undefined') {
+      topicRenderedContent.querySelectorAll('pre code').forEach(block => {
+        hljs.highlightElement(block);
+      });
+    }
+
+    // 본문 내 이미지 클릭 시 라이트박스 팝업 연동
+    topicRenderedContent.querySelectorAll('img').forEach(img => {
+      img.classList.add('cursor-zoom-in', 'hover:opacity-90', 'transition', 'rounded-lg', 'shadow-md');
+      img.addEventListener('click', () => {
+        if (typeof openImageModal === 'function') {
+          openImageModal(img.src, img.alt);
+        } else if (imageModal && modalImage) {
+          modalImage.src = img.src;
+          if (modalCaption) modalCaption.textContent = img.alt || '';
+          imageModal.classList.remove('hidden');
+        }
+      });
+    });
+
+    // 출처 하이퍼링크 크로스 탭 내비게이션 및 시각적 알약 배지(Badge) 바인딩
+    topicRenderedContent.querySelectorAll('a').forEach(link => {
+      const href = link.getAttribute('href') || '';
+      const text = link.textContent.trim();
+      const isSourceLink = href.startsWith('/api/documents/') || href.includes('/documents/') || text.includes('출처');
+
+      if (isSourceLink) {
+        link.className = 'source-badge';
+        link.title = '클릭 시 지식 DB 원본 문서로 이동하여 완본 열람';
+
+        let cleanText = text.replace(/^[<\[\s]*출처\s*:\s*/, '').replace(/[>\]\s]*$/, '');
+        if (!cleanText) cleanText = '원본 문서';
+        link.innerHTML = `<i class="fa-solid fa-bookmark text-amber-400 mr-1"></i><span>&lt;출처 : <span class="font-semibold text-indigo-100 underline decoration-indigo-400/50">${cleanText}</span>&gt;</span>`;
+
+        link.addEventListener('click', async (e) => {
+          e.preventDefault();
+          const parts = href.split('/api/documents/');
+          const rawDocId = parts.length > 1 ? parts[1] : href.split('/').pop();
+          const cleanDocId = decodeURIComponent(rawDocId).trim();
+
+          showToast(`지식 DB 원본 문서로 이동: ${cleanDocId}`, 'info');
+          switchTab('viewer');
+          await loadDocument(cleanDocId);
+        });
+      }
+    });
+
+    // 만약 링크 마크다운 없이 본문에 평문 '출처: ...'로 들어간 경우 시각적 배지로 자동 변환
+    topicRenderedContent.querySelectorAll('p, li').forEach(el => {
+      if (el.querySelector('a.source-badge')) return;
+      if (el.innerHTML.includes('출처:') || el.innerHTML.includes('출처 :')) {
+        el.innerHTML = el.innerHTML.replace(
+          /(?:<|\(|\[)?\s*출처\s*:\s*([a-zA-Z0-9가-힣_\-().\s]+?)(?:>|\)|\])?(?=[.,\n<]|$)/g,
+          '<span class="source-badge"><i class="fa-solid fa-bookmark text-amber-400 mr-1"></i><span>&lt;출처 : <span class="font-semibold text-indigo-100">$1</span>&gt;</span></span>'
+        );
+      }
+    });
+
+    // 5. 데이터 출처 섹션 목록 내 동일 문헌 중복 li 요소 정리
+    const allHeaders = Array.from(topicRenderedContent.querySelectorAll('h1, h2, h3'));
+    const sec5Header = allHeaders.find(h => h.textContent.includes('데이터 출처') || h.textContent.includes('5. 데이터'));
+    if (sec5Header) {
+      let nextElem = sec5Header.nextElementSibling;
+      while (nextElem && !['H1', 'H2', 'H3'].includes(nextElem.tagName)) {
+        if (nextElem.tagName === 'UL' || nextElem.tagName === 'OL') {
+          const seenKeys = new Set();
+          Array.from(nextElem.querySelectorAll('li')).forEach(li => {
+            const rawText = li.textContent.replace(/[\s_()\[\]\-\.]+/g, '').replace(/출처/g, '').toLowerCase();
+            if (seenKeys.has(rawText)) {
+              li.remove();
+            } else {
+              seenKeys.add(rawText);
+            }
+          });
+        }
+        nextElem = nextElem.nextElementSibling;
+      }
+    }
+  }
+
+  // 19. 보고서 생성 실행
+  async function generateTopicReport() {
+    const topic = topicInput ? topicInput.value.trim() : '';
+    if (!topic) {
+      showToast('생성할 주제어를 입력해 주십시오.', 'error');
+      if (topicInput) topicInput.focus();
+      return;
+    }
+
+    // 로딩 상태 시작
+    if (btnGenerateTopic) btnGenerateTopic.disabled = true;
+    if (genIcon) genIcon.className = 'fa-solid fa-spinner animate-spin';
+    if (genBtnText) genBtnText.textContent = '생성 중...';
+
+    if (topicEmptyState) topicEmptyState.classList.add('hidden');
+    if (topicReportViewer) topicReportViewer.classList.add('hidden');
+    if (topicLoadingState) topicLoadingState.classList.remove('hidden');
+
+    // 단계별 상태 메시지 애니메이션
+    const stages = [
+      { title: 'WikiDB 지식 데이터베이스 탐색 중...', desc: '축적된 완본 문서들에서 주제 키워드와 연관 섹션을 매핑하고 있습니다.', progress: '30%' },
+      { title: '핵심 텍스트 및 도표 이미지 추출 중...', desc: '인용에 활용할 기술 아키텍처 다이어그램 및 시장 규모 그래프를 선별하고 있습니다.', progress: '65%' },
+      { title: 'Gemini LLM 5대 목차 보고서 종합 작성 중...', desc: '기술개요, 기술동향, 시장동향, 주요업체, 데이터 출처 체계로 완본 마크다운을 작성 중입니다.', progress: '90%' }
+    ];
+
+    let currentStage = 0;
+    const stageTimer = setInterval(() => {
+      currentStage = (currentStage + 1) % stages.length;
+      if (loadingStageTitle) loadingStageTitle.textContent = stages[currentStage].title;
+      if (loadingStageDesc) loadingStageDesc.textContent = stages[currentStage].desc;
+      if (loadingProgressBar) loadingProgressBar.style.width = stages[currentStage].progress;
+    }, 4000);
+
+    try {
+      const res = await fetch('/api/topic/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic })
+      });
+
+      clearInterval(stageTimer);
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `보고서 생성 실패 (${res.status})`);
+      }
+
+      const reportData = await res.json();
+      currentTopicReport = reportData;
+      currentActiveTopicReportId = reportData.id;
+
+      // 렌더링
+      if (reportTitleHeading) reportTitleHeading.textContent = reportData.title;
+      if (reportDateBadge) reportDateBadge.textContent = reportData.created_at || '';
+      renderTopicMarkdown(reportData.markdown);
+
+      if (topicLoadingState) topicLoadingState.classList.add('hidden');
+      if (topicReportViewer) topicReportViewer.classList.remove('hidden');
+
+      showToast(`'${topic}' 보고서가 성공적으로 생성 및 저장되었습니다!`, 'success');
+
+      // 이력 및 사이드바 새로고침
+      await loadTopicHistory();
+      await fetchDocuments();
+    } catch (err) {
+      clearInterval(stageTimer);
+      console.error('보고서 생성 실패:', err);
+      showToast(err.message, 'error');
+      if (topicLoadingState) topicLoadingState.classList.add('hidden');
+      if (topicEmptyState) topicEmptyState.classList.remove('hidden');
+    } finally {
+      if (btnGenerateTopic) btnGenerateTopic.disabled = false;
+      if (genIcon) genIcon.className = 'fa-solid fa-wand-magic-sparkles';
+      if (genBtnText) genBtnText.textContent = '보고서 생성';
+      if (loadingProgressBar) loadingProgressBar.style.width = '30%';
+    }
+  }
+
+  if (btnGenerateTopic) {
+    btnGenerateTopic.addEventListener('click', generateTopicReport);
+  }
+  if (topicInput) {
+    topicInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        generateTopicReport();
+      }
+    });
+  }
+
+  // 20. 생성된 마크다운 복사 및 다운로드
+  if (copyGenMdBtn) {
+    copyGenMdBtn.addEventListener('click', async () => {
+      if (!currentTopicReport || !currentTopicReport.markdown) {
+        showToast('복사할 보고서 내용이 없습니다.', 'error');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(currentTopicReport.markdown);
+        showToast('보고서 마크다운이 클립보드에 복사되었습니다!', 'success');
+      } catch (err) {
+        showToast('클립보드 복사 실패', 'error');
+      }
+    });
+  }
+
+  if (downloadGenMdBtn) {
+    downloadGenMdBtn.addEventListener('click', () => {
+      if (!currentTopicReport || !currentTopicReport.markdown) {
+        showToast('다운로드할 보고서가 없습니다.', 'error');
+        return;
+      }
+      const blob = new Blob([currentTopicReport.markdown], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = currentTopicReport.file_name || `${currentTopicReport.topic || 'report'}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('보고서 파일 다운로드가 시작되었습니다.', 'success');
+    });
+  }
+
+  // 21. 보고서 품질 검수 모달 열기 및 렌더링
+  function openReviewModal(reviewData) {
+    if (!reportReviewModal) return;
+    lastReviewResult = reviewData;
+
+    // 모달 상단 보고서 제목 표시
+    if (reviewModalReportTitle) {
+      reviewModalReportTitle.textContent = (currentTopicReport && currentTopicReport.title)
+        ? currentTopicReport.title
+        : (currentActiveTopicReportId || '보고서 검수');
+    }
+
+    // 5대 핵심 체크리스트 렌더링 (점수 메타데이터는 UI에 노출하지 않음)
+    if (reviewChecklistContainer) {
+      const checklistItems = [
+        { key: 'structure_valid', label: '5대 표준 목차 준수 (기술개요~데이터출처)' },
+        { key: 'tables_valid', label: '3대 필수 비교 표 구비 (기술/시장/기업)' },
+        { key: 'quantitative_data_valid', label: '정량 데이터 및 단위 규격 충실도' },
+        { key: 'images_valid', label: '시각 자산(도표 및 구조도) 결합' },
+        { key: 'tone_valid', label: '전문 보고서 어조 및 AI 상투어 배제' }
+      ];
+
+      const checklist = (reviewData && reviewData.checklist) || {};
+
+      reviewChecklistContainer.innerHTML = checklistItems.map(item => {
+        const isValid = Boolean(checklist[item.key]);
+        const statusBadge = isValid
+          ? '<span class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-500/30 flex items-center gap-1"><i class="fa-solid fa-check text-[9px]"></i> 통과</span>'
+          : '<span class="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-500/30 flex items-center gap-1"><i class="fa-solid fa-xmark text-[9px]"></i> 미흡</span>';
+
+        return `
+          <div class="flex items-center justify-between p-2 rounded-lg bg-slate-900/60 border ${isValid ? 'border-slate-700/60' : 'border-rose-500/40'}">
+            <span class="text-xs ${isValid ? 'text-slate-200' : 'text-rose-200 font-medium'} flex items-center gap-2">
+              <i class="fa-solid ${isValid ? 'fa-circle-check text-emerald-400' : 'fa-circle-exclamation text-rose-400'} text-xs"></i>
+              ${item.label}
+            </span>
+            ${statusBadge}
+          </div>
+        `;
+      }).join('');
+    }
+
+    // 지적된 결함 목록 렌더링
+    if (reviewDefectsList) {
+      const defects = (reviewData && reviewData.defects) || [];
+      if (defects.length > 0) {
+        if (reviewDefectsSection) reviewDefectsSection.classList.remove('hidden');
+        reviewDefectsList.innerHTML = defects.map(defect => `
+          <div class="p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-2">
+            <i class="fa-solid fa-triangle-exclamation text-rose-400 mt-0.5 shrink-0"></i>
+            <div class="flex-1">${defect}</div>
+          </div>
+        `).join('');
+      } else {
+        reviewDefectsList.innerHTML = `
+          <div class="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-200 text-xs flex items-center gap-2">
+            <i class="fa-solid fa-circle-check text-emerald-400 shrink-0"></i>
+            <span>지적된 결함이 없습니다. 모든 품질 기준을 충족합니다.</span>
+          </div>
+        `;
+      }
+    }
+
+    // 권장 개선 제안 렌더링
+    if (reviewSuggestionsList) {
+      const suggestions = (reviewData && reviewData.actionable_suggestions) || [];
+      if (suggestions.length > 0) {
+        if (reviewSuggestionsSection) reviewSuggestionsSection.classList.remove('hidden');
+        reviewSuggestionsList.innerHTML = suggestions.map(sugg => `
+          <div class="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2">
+            <i class="fa-solid fa-lightbulb text-amber-400 mt-0.5 shrink-0"></i>
+            <div class="flex-1">${sugg}</div>
+          </div>
+        `).join('');
+      } else {
+        reviewSuggestionsList.innerHTML = `
+          <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-700/60 text-slate-400 text-xs">
+            권장 개선 제안이 없습니다.
+          </div>
+        `;
+      }
+    }
+
+    // 보정 버튼 상태 제어 (결함이 없고 전체 통과한 경우)
+    if (btnApplyRefine) {
+      const defects = (reviewData && reviewData.defects) || [];
+      if (defects.length === 0 && reviewData && reviewData.passed_all) {
+        btnApplyRefine.classList.add('opacity-60', 'pointer-events-none');
+        btnApplyRefine.title = '모든 품질 기준을 통과하여 추가 보정이 불필요합니다.';
+      } else {
+        btnApplyRefine.classList.remove('opacity-60', 'pointer-events-none');
+        btnApplyRefine.title = '검수 피드백을 반영하여 보고서를 자동 보정합니다.';
+      }
+    }
+
+    reportReviewModal.classList.remove('hidden');
+  }
+
+  // 22. 보고서 품질 검수 모달 닫기
+  function closeReviewModal() {
+    if (reportReviewModal) {
+      reportReviewModal.classList.add('hidden');
+    }
+  }
+
+  // 23. 모달 닫기 이벤트 리스너 바인딩
+  if (btnCloseReviewModal) {
+    btnCloseReviewModal.addEventListener('click', closeReviewModal);
+  }
+  if (btnCloseReviewModal2) {
+    btnCloseReviewModal2.addEventListener('click', closeReviewModal);
+  }
+  if (reportReviewModal) {
+    reportReviewModal.addEventListener('click', (e) => {
+      if (e.target === reportReviewModal) {
+        closeReviewModal();
+      }
+    });
+  }
+
+  // 24. 보고서 품질 검수 실행 이벤트 핸들러
+  if (btnReviewReport) {
+    btnReviewReport.addEventListener('click', async () => {
+      const targetReportId = currentActiveTopicReportId || (currentTopicReport && currentTopicReport.id);
+      if (!targetReportId) {
+        showToast('검수할 대상 보고서가 없습니다. 보고서를 먼저 선택하거나 생성하십시오.', 'error');
+        return;
+      }
+
+      // 로딩 상태 전환
+      btnReviewReport.disabled = true;
+      if (reviewIcon) reviewIcon.className = 'fa-solid fa-spinner animate-spin';
+      if (btnReviewReportText) btnReviewReportText.textContent = '검수 중...';
+
+      try {
+        showToast('보고서 품질 검수를 진행하고 있습니다...', 'info');
+        const res = await fetch(`/api/topic/reports/${encodeURIComponent(targetReportId)}/review`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `보고서 검수 실패 (${res.status})`);
+        }
+
+        const data = await res.json();
+        const reviewData = data.review || data;
+        openReviewModal(reviewData);
+        showToast('품질 검수가 완료되었습니다.', 'success');
+      } catch (err) {
+        console.error('보고서 품질 검수 실패:', err);
+        showToast(`품질 검수 실패: ${err.message}`, 'error');
+      } finally {
+        btnReviewReport.disabled = false;
+        if (reviewIcon) reviewIcon.className = 'fa-solid fa-clipboard-check';
+        if (btnReviewReportText) btnReviewReportText.textContent = '품질 검수';
+      }
+    });
+  }
+
+  // 25. 피드백 반영 보정 실행 이벤트 핸들러
+  if (btnApplyRefine) {
+    btnApplyRefine.addEventListener('click', async () => {
+      const targetReportId = currentActiveTopicReportId || (currentTopicReport && currentTopicReport.id);
+      if (!targetReportId) {
+        showToast('보정할 대상 보고서 ID가 없습니다.', 'error');
+        return;
+      }
+      if (!lastReviewResult) {
+        showToast('반영할 검수 피드백 정보가 없습니다. 먼저 품질 검수를 실행하십시오.', 'error');
+        return;
+      }
+
+      // 로딩 상태 전환
+      btnApplyRefine.disabled = true;
+      if (refineIcon) refineIcon.className = 'fa-solid fa-spinner animate-spin';
+      if (refineBtnText) refineBtnText.textContent = '보정 반영 중...';
+
+      try {
+        showToast('피드백을 반영하여 보고서를 보정 중입니다. 잠시만 기다려 주십시오...', 'info');
+
+        const res = await fetch(`/api/topic/reports/${encodeURIComponent(targetReportId)}/refine`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feedback: lastReviewResult })
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `보고서 보정 실패 (${res.status})`);
+        }
+
+        const updatedReport = await res.json();
+        currentTopicReport = updatedReport;
+        currentActiveTopicReportId = updatedReport.id || targetReportId;
+
+        // 뷰어 본문 및 헤더 즉시 리프레시
+        if (reportTitleHeading) reportTitleHeading.textContent = updatedReport.title;
+        if (reportDateBadge) reportDateBadge.textContent = updatedReport.ingested_at || updatedReport.created_at || '';
+        renderTopicMarkdown(updatedReport.content || updatedReport.markdown || '');
+
+        // 검수 모달 닫기
+        closeReviewModal();
+
+        showToast('피드백이 반영되어 보고서가 성공적으로 보정되었습니다!', 'success');
+
+        // 사이드바 및 이력 목록 갱신
+        if (typeof loadTopicHistory === 'function') await loadTopicHistory();
+        if (typeof fetchDocuments === 'function') await fetchDocuments();
+      } catch (err) {
+        console.error('보고서 보정 실패:', err);
+        showToast(`보고서 보정 실패: ${err.message}`, 'error');
+      } finally {
+        btnApplyRefine.disabled = false;
+        if (refineIcon) refineIcon.className = 'fa-solid fa-wand-magic-sparkles';
+        if (refineBtnText) refineBtnText.textContent = '피드백 반영 보정';
+      }
+    });
+  }
+
+  // 26. 주기적 자동 폴링 (기존 5초 유지)
   setInterval(() => {
     fetchDocuments();
   }, 5000);
 
   // 초기 실행
   fetchDocuments();
+  loadTopicSuggestions();
+  loadTopicHistory();
 });
+

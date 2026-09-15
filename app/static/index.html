@@ -18,7 +18,7 @@
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
   <!-- Custom CSS (캐시 버스팅) -->
-  <link rel="stylesheet" href="/static/style.css?v=20260827_04">
+  <link rel="stylesheet" href="/static/style.css?v=20260914_02">
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -62,6 +62,16 @@
         </div>
       </div>
 
+      <!-- 중앙 탭 전환 네비게이션 -->
+      <nav class="flex items-center gap-1 bg-slate-900/80 p-1 rounded-xl border border-slate-700/80 shadow-inner">
+        <button id="tabBtnViewer" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white shadow-md transition flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-database"></i> <span>지식 DB 뷰어</span>
+        </button>
+        <button id="tabBtnGenerator" class="px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 transition flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> <span>주제별 보고서 생성</span>
+        </button>
+      </nav>
+
       <div class="flex items-center gap-2">
         <button id="scanBtn" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5 shadow-sm active:scale-95">
           <i class="fa-solid fa-arrows-rotate" id="scanIcon"></i>
@@ -80,7 +90,10 @@
   <!-- 메인 컨텐츠 영역 -->
   <div class="flex-1 flex overflow-hidden max-w-7xl w-full mx-auto relative">
     
-    <!-- 모바일 드로어 오버레이 -->
+    <!-- 탭 1: 기존 지식 DB 뷰어 컨테이너 (기존 ID 및 구조 100% 보존) -->
+    <div id="viewerTabContent" class="flex-1 flex overflow-hidden w-full h-full relative">
+
+      <!-- 모바일 드로어 오버레이 -->
     <div id="mobileOverlay" class="fixed inset-0 bg-black/60 z-20 hidden lg:hidden transition-opacity"></div>
 
     <!-- 좌측 문서 탐색기 사이드바 -->
@@ -152,6 +165,10 @@
             </div>
 
             <div class="flex items-center gap-2 self-end sm:self-auto">
+              <button id="auditDocBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95" title="문서 무결성 및 품질 검수">
+                <i class="fa-solid fa-shield-halved" id="auditIcon"></i>
+                <span class="hidden md:inline">품질 검수</span>
+              </button>
               <button id="copyMdBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5" title="마크다운 원문 복사">
                 <i class="fa-regular fa-copy"></i>
                 <span class="hidden md:inline">MD 복사</span>
@@ -200,6 +217,140 @@
         </div>
       </div>
     </main>
+
+    </div>
+    <!-- 탭 1 (지식 DB 뷰어) 컨테이너 끝 -->
+
+    <!-- 탭 2: 신규 주제별 보고서 생성기 컨테이너 -->
+    <div id="generatorTabContent" class="flex-1 flex flex-col overflow-hidden w-full h-full hidden bg-slate-900">
+      
+      <!-- 상단 주제 입력 및 추천 키워드 영역 -->
+      <div class="bg-slate-800/90 border-b border-slate-700/80 p-4 shrink-0 space-y-3">
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <div class="relative flex-1">
+            <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-sm"></i>
+            <input type="text" id="topicInput" placeholder="생성할 보고서의 주제를 입력하세요 (예: 칩렛 패키징 기술 동향, 이차전지 양극재 시장, 인공지능 반도체 등)..." class="w-full pl-10 pr-4 py-2 text-sm rounded-xl bg-slate-900 border border-slate-600 text-white placeholder-slate-400 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition shadow-inner">
+          </div>
+          <button id="btnGenerateTopic" class="px-5 py-2 text-sm font-semibold rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white shadow-lg shadow-brand-600/30 transition flex items-center justify-center gap-2 active:scale-95 shrink-0 cursor-pointer">
+            <i class="fa-solid fa-wand-magic-sparkles" id="genIcon"></i>
+            <span id="genBtnText">보고서 생성</span>
+          </button>
+        </div>
+
+        <!-- 추천 검색어 배지 바 -->
+        <div class="flex items-center gap-2 text-xs text-slate-400 overflow-x-auto pb-1">
+          <span class="shrink-0 flex items-center gap-1 text-slate-300 font-medium">
+            <i class="fa-solid fa-tags text-amber-400"></i> 추천 주제:
+          </span>
+          <div id="topicSuggestionsBar" class="flex items-center gap-1.5 flex-wrap">
+            <!-- JS로 동적 생성 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 메인 2단 작업 영역 (좌: 생성 결과/로딩/빈상태, 우: 최근 생성 이력 사이드바) -->
+      <div class="flex-1 flex overflow-hidden relative">
+        
+        <!-- 좌측 결과 뷰어 영역 -->
+        <div class="flex-1 flex flex-col overflow-hidden relative bg-slate-900 min-w-0">
+          
+          <!-- 빈 상태 (초기 안내 화면) -->
+          <div id="topicEmptyState" class="flex-1 flex flex-col items-center justify-center p-6 text-center">
+            <div class="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500/20 to-brand-500/20 border border-brand-500/30 flex items-center justify-center mb-4 text-brand-400 shadow-xl">
+              <i class="fa-solid fa-wand-magic-sparkles text-3xl"></i>
+            </div>
+            <h2 class="text-lg font-bold text-white mb-2">원하는 주제의 전문 기술·시장 보고서를 생성하세요</h2>
+            <p class="text-xs text-slate-400 max-w-md mb-6 leading-relaxed">
+              WikiDB에 축적된 119개 이상의 완본 보고서에서 관련 섹션과 아키텍처·시장 도표 이미지를 검색하고, Gemini LLM이 5대 표준 목차(개요·동향·시장규모·주요업체·출처)로 체계화된 신규 완본 마크다운을 완성합니다.
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl w-full text-left text-xs">
+              <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                <div class="font-bold text-brand-300 mb-1 flex items-center gap-1.5"><i class="fa-solid fa-list-check"></i> 5대 표준 목차</div>
+                <div class="text-[11px] text-slate-400">기술개요, 기술동향, 시장동향, 주요업체, 데이터 출처를 빠짐없이 자동 구성</div>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                <div class="font-bold text-emerald-300 mb-1 flex items-center gap-1.5"><i class="fa-solid fa-image"></i> 도표 이미지 결합</div>
+                <div class="text-[11px] text-slate-400">인용한 텍스트 바로 하단에 관련 차트와 구조도 이미지를 자동 배치</div>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                <div class="font-bold text-purple-300 mb-1 flex items-center gap-1.5"><i class="fa-solid fa-link"></i> 원본 출처 크로스 링크</div>
+                <div class="text-[11px] text-slate-400">텍스트 끝 출처 링크 클릭 시 지식 DB 뷰어의 원본 문서로 즉시 전환 연동</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 로딩 진행 인디케이터 -->
+          <div id="topicLoadingState" class="flex-1 flex flex-col items-center justify-center p-8 text-center hidden">
+            <div class="relative w-20 h-20 mb-6">
+              <div class="w-20 h-20 rounded-full border-4 border-slate-700 border-t-brand-500 animate-spin"></div>
+              <div class="absolute inset-0 flex items-center justify-center text-brand-400">
+                <i class="fa-solid fa-microchip text-2xl animate-pulse"></i>
+              </div>
+            </div>
+            <h3 id="loadingStageTitle" class="text-base font-bold text-white mb-2">WikiDB 데이터베이스 탐색 중...</h3>
+            <p id="loadingStageDesc" class="text-xs text-slate-400 max-w-sm mb-6">수만 자의 완본 문서에서 주제와 관련된 핵심 섹션 및 도표 이미지를 정밀 매핑하고 있습니다.</p>
+            <div class="w-64 bg-slate-800 rounded-full h-1.5 overflow-hidden border border-slate-700">
+              <div id="loadingProgressBar" class="bg-gradient-to-r from-brand-500 to-indigo-400 h-1.5 rounded-full w-1/3 transition-all duration-500"></div>
+            </div>
+          </div>
+
+          <!-- 보고서 결과 화면 (기본 hidden) -->
+          <div id="topicReportViewer" class="flex-1 flex flex-col overflow-hidden hidden">
+            
+            <!-- 보고서 상단 툴바 -->
+            <div class="bg-slate-800/80 border-b border-slate-700 p-4 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-900/60 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                    <i class="fa-solid fa-robot"></i> 🤖 AI 생성 보고서
+                  </span>
+                  <span id="reportDateBadge" class="text-xs text-slate-400"></span>
+                </div>
+                <h2 id="reportTitleHeading" class="text-base sm:text-lg font-bold text-white truncate"></h2>
+              </div>
+              
+              <div class="flex items-center gap-2 self-end sm:self-auto">
+                <button id="btnReviewReport" class="px-2.5 py-1.5 text-xs rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95" title="보고서 품질 검수">
+                  <i class="fa-solid fa-clipboard-check" id="reviewIcon"></i>
+                  <span id="btnReviewReportText">품질 검수</span>
+                </button>
+                <button id="copyGenMdBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5 cursor-pointer">
+                  <i class="fa-regular fa-copy"></i>
+                  <span>MD 복사</span>
+                </button>
+                <button id="downloadGenMdBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition flex items-center gap-1.5 shadow-md cursor-pointer">
+                  <i class="fa-solid fa-download"></i>
+                  <span>MD 다운로드</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 마크다운 렌더링 스크롤 영역 -->
+            <div class="flex-1 overflow-y-auto p-4 sm:p-8 markdown-body" id="topicRenderedContent">
+              <!-- 렌더링된 마크다운 HTML -->
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 우측 최근 생성 이력 패널 (PC/태블릿) -->
+        <aside class="w-72 border-l border-slate-700/80 bg-slate-800/40 flex flex-col shrink-0 hidden md:flex">
+          <div class="p-3 border-b border-slate-700/80 flex items-center justify-between">
+            <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <i class="fa-solid fa-clock-rotate-left text-brand-400"></i> 생성 이력
+            </h3>
+            <span id="reportCountBadge" class="text-[11px] bg-slate-700/60 px-2 py-0.5 rounded text-slate-300">0건</span>
+          </div>
+          
+          <div id="topicHistoryList" class="flex-1 overflow-y-auto p-2 space-y-1.5">
+            <!-- JS로 생성 이력 카드 동적 생성 -->
+          </div>
+        </aside>
+
+      </div>
+
+    </div>
+    <!-- 탭 2 (주제별 보고서 생성기) 끝 -->
   </div>
 
   <!-- 이미지 라이트박스 팝업 모달 -->
@@ -213,10 +364,109 @@
     </div>
   </div>
 
+  <!-- 문서 품질 검수 및 자율 치유 모달 -->
+  <div id="auditModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl max-w-xl w-full p-6 text-slate-200 animate-in fade-in zoom-in duration-150">
+      <div class="flex items-center justify-between pb-4 border-b border-slate-700/80">
+        <div class="flex items-center gap-2.5">
+          <div id="auditModalIconBg" class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center">
+            <i class="fa-solid fa-shield-halved text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white" id="auditModalTitle">문서 무결성 및 품질 검수</h3>
+            <p class="text-[11px] text-slate-400 truncate max-w-xs" id="auditModalDocName">문서명</p>
+          </div>
+        </div>
+        <button id="closeAuditModalBtn" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700 transition">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <div class="py-5 space-y-4 max-h-[60vh] overflow-y-auto pr-1" id="auditModalBody">
+        <!-- 동적 렌더링 영역 -->
+      </div>
+
+      <div class="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-700/80">
+        <button id="closeAuditModalBottomBtn" class="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 transition">
+          닫기
+        </button>
+        <button id="executeHealBtn" class="px-4 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center gap-1.5 shadow-md shadow-indigo-600/20 active:scale-95 hidden">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span id="healBtnText">자율 치유 실행</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 보고서 품질 검수 및 피드백 반영 모달 -->
+  <div id="reportReviewModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl max-w-xl w-full p-6 text-slate-200 animate-in fade-in zoom-in duration-150 flex flex-col max-h-[90vh]">
+      <!-- 모달 상단 헤더 -->
+      <div class="flex items-center justify-between pb-4 border-b border-slate-700/80 shrink-0">
+        <div class="flex items-center gap-2.5">
+          <div id="reviewModalIconBg" class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center">
+            <i class="fa-solid fa-clipboard-check text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">보고서 품질 검수 결과</h3>
+            <p class="text-[11px] text-slate-400 truncate max-w-xs" id="reviewModalReportTitle">보고서 제목</p>
+          </div>
+        </div>
+        <button id="btnCloseReviewModal" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700 transition" aria-label="검수 모달 닫기">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <!-- 모달 스크롤 본문 영역 -->
+      <div class="py-4 space-y-4 overflow-y-auto pr-1 flex-1">
+        <!-- 5대 기준 체크리스트 컨테이너 -->
+        <div>
+          <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <i class="fa-solid fa-list-check text-brand-400"></i> 5대 핵심 품질 점검 항목
+          </h4>
+          <div id="reviewChecklistContainer" class="space-y-1.5">
+            <!-- JS 동적 생성 -->
+          </div>
+        </div>
+
+        <!-- 결함 목록 컨테이너 -->
+        <div id="reviewDefectsSection">
+          <h4 class="text-xs font-bold text-rose-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <i class="fa-solid fa-triangle-exclamation text-rose-400"></i> 지적된 결함 사항 (Defects)
+          </h4>
+          <div id="reviewDefectsList" class="space-y-1.5 text-xs">
+            <!-- JS 동적 생성 -->
+          </div>
+        </div>
+
+        <!-- 개선 제안 목록 컨테이너 -->
+        <div id="reviewSuggestionsSection">
+          <h4 class="text-xs font-bold text-amber-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <i class="fa-solid fa-lightbulb text-amber-400"></i> 권장 개선 제안 (Suggestions)
+          </h4>
+          <div id="reviewSuggestionsList" class="space-y-1.5 text-xs">
+            <!-- JS 동적 생성 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 모달 하단 액션 버튼 영역 -->
+      <div class="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-700/80 shrink-0">
+        <button id="btnCloseReviewModal2" class="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 transition">
+          닫기
+        </button>
+        <button id="btnApplyRefine" class="px-4 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center gap-1.5 shadow-md shadow-indigo-600/20 active:scale-95">
+          <i class="fa-solid fa-wand-magic-sparkles" id="refineIcon"></i>
+          <span id="refineBtnText">피드백 반영 보정</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- 토스트 알림 컨테이너 -->
   <div id="toastContainer" class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none"></div>
 
   <!-- 메인 스크립트 (캐시 버스팅) -->
-  <script src="/static/app.js?v=20260828_07"></script>
+  <script src="/static/app.js?v=20260915_01"></script>
 </body>
 </html>
