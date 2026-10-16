@@ -64,10 +64,27 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to Cloud Run
+        env:
+          WIKI_ACCESS_PIN: ${{ secrets.WIKI_ACCESS_PIN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          python3 -c "
+          import os, json
+          pin = os.environ.get('WIKI_ACCESS_PIN', '')
+          folder = os.environ.get('GDRIVE_FOLDER_ID', '')
+          api_key = os.environ.get('GEMINI_API_KEY', '')
+          with open('env.yaml', 'w', encoding='utf-8') as f:
+              f.write('STORAGE_MODE: \"gdrive\"\n')
+              f.write(f'WIKI_ACCESS_PIN: \"{pin}\"\n')
+              f.write(f'GDRIVE_FOLDER_ID: \"{folder}\"\n')
+              f.write('GDRIVE_CREDENTIALS_PATH: \"gdrive_credentials.json\"\n')
+              f.write(f'GEMINI_API_KEY: {json.dumps(api_key)}\n')
+          "
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --source . \
+            --project ${{ env.PROJECT_ID }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --allow-unauthenticated \
-            --set-env-vars STORAGE_MODE=gdrive,WIKI_ACCESS_PIN=${{ secrets.WIKI_ACCESS_PIN }},GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }},GDRIVE_CREDENTIALS_PATH=gdrive_credentials.json,GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+            --env-vars-file env.yaml

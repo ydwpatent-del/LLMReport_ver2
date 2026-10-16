@@ -12,3 +12,4 @@ WikiDB/manifest.json.corrupted_*
 tests/
 *.log
 desktop.ini
+env.yaml
