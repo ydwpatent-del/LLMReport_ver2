@@ -51,12 +51,14 @@ class IngestAgent:
         source_dir: Path,
         manifest_mgr: ManifestManager,
         engine: Union[KordocWikiAgent, KordocEngine],
-        supported_exts: set[str]
+        supported_exts: set[str],
+        auto_sync_gdrive: bool = True
     ):
         self.source_dir = source_dir
         self.manifest_mgr = manifest_mgr
         self.engine = engine
         self.supported_exts = {ext.lower() for ext in supported_exts}
+        self.auto_sync_gdrive = auto_sync_gdrive
         self.observer: Optional[Observer] = None
         # 동시 처리 방지를 위한 파일 경로 집합 및 락 (TOCTOU 방지)
         self._processing_files: set[Path] = set()
@@ -98,9 +100,14 @@ class IngestAgent:
                 logger.info(f"[건너뜀] 이미 변환된 파일입니다: {file_path.name} (Hash: {file_hash[:8]}...)")
                 return False
 
-            # 동일 파일에 대해 기존에 실패(failed)했거나 고착된 좀비 항목이 있다면 정리
+            # 동일 파일에 대해 기존에 실패(failed)했거나 고착된 좀비 항목이 있다면 매니페스트 및 고아 에셋 폴더 정리
             for old_doc in self.manifest_mgr.get_all_documents():
                 if (old_doc.file_hash == file_hash or old_doc.original_filename == file_path.name) and old_doc.status != "completed":
+                    if hasattr(self.engine, "assets_dir") and old_doc.id:
+                        old_asset_dir = Path(self.engine.assets_dir) / old_doc.id
+                        if old_asset_dir.exists() and old_asset_dir.is_dir():
+                            import shutil
+                            shutil.rmtree(old_asset_dir, ignore_errors=True)
                     self.manifest_mgr.delete_document(old_doc.id)
 
             doc_id = sanitize_doc_id(file_path.name)
@@ -123,9 +130,15 @@ class IngestAgent:
             )
             self.manifest_mgr.add_or_update_document(init_entry)
 
+            heartbeat = lambda: self.manifest_mgr.touch_processing(doc_id)
             is_pdf = file_path.suffix.lower() == ".pdf"
             if hasattr(self.engine, "execute_ingest"):
-                target_md, images, title = self.engine.execute_ingest(file_path, doc_id, file_hash)
+                try:
+                    target_md, images, title = self.engine.execute_ingest(
+                        file_path, doc_id, file_hash, heartbeat_cb=heartbeat
+                    )
+                except TypeError:
+                    target_md, images, title = self.engine.execute_ingest(file_path, doc_id, file_hash)
 
                 # 스캔본 PDF 자동 감지: 추출 텍스트가 500자 미만이면 OCR 재시도
                 if is_pdf:
@@ -134,9 +147,14 @@ class IngestAgent:
                     content_body = extracted_text[300:] if len(extracted_text) > 300 else extracted_text
                     if len(content_body.strip()) < 500:
                         logger.warning(f"[스캔본 감지] '{file_path.name}' 텍스트 추출량 부족 ({len(content_body)}자) → OCR 모드 재시도")
-                        target_md, images, title = self.engine.execute_ingest(
-                            file_path, doc_id, file_hash, enable_ocr=True
-                        )
+                        try:
+                            target_md, images, title = self.engine.execute_ingest(
+                                file_path, doc_id, file_hash, enable_ocr=True, heartbeat_cb=heartbeat
+                            )
+                        except TypeError:
+                            target_md, images, title = self.engine.execute_ingest(
+                                file_path, doc_id, file_hash, enable_ocr=True
+                            )
             else:
                 target_md, images, title = self.engine.convert(file_path, doc_id, file_hash)
 
@@ -154,6 +172,7 @@ class IngestAgent:
             )
             self.manifest_mgr.add_or_update_document(entry)
             logger.info(f"[성공] kordoc-wiki-ingest 완본 생성 및 WikiDB 등록: {target_md.name}")
+            self._trigger_auto_sync(doc_id=doc_id, target_md=target_md)
             return True
 
         except Exception as e:
@@ -182,6 +201,45 @@ class IngestAgent:
             with self._lock:
                 self._processing_files.discard(resolved_path)
 
+    def _trigger_auto_sync(self, doc_id: str, target_md: Optional[Path] = None) -> None:
+        """인제스트 완료 후 Google Drive 연동(번들 갱신 및 자동 전송)을 비동기 백그라운드 스레드로 실행한다."""
+        if not getattr(self, "auto_sync_gdrive", True):
+            return
+
+        def _worker():
+            try:
+                from app.gdrive_storage import get_gdrive_storage
+                storage = get_gdrive_storage()
+                wiki_db_dir = self.manifest_mgr.manifest_path.parent
+
+                # 1. 텍스트 번들(3.7MB) 자동 갱신
+                bundle_info = storage.create_text_bundle(wiki_db_dir)
+                logger.info(
+                    f"📦 [자동 훅] 신규 문서 인제스트 후 텍스트 번들 자동 갱신 완료 "
+                    f"({bundle_info['bundle_size_bytes'] / (1024 * 1024):.2f}MB, 문서 {bundle_info['docs_count']}건)"
+                )
+
+                # 2. 로컬 구글 드라이브 데스크톱 폴더가 설정된 경우 즉시 복사/동기화
+                if storage.has_mirror_dir:
+                    sync_res = storage.sync_with_mirror_dir(
+                        wiki_db_dir,
+                        storage.settings.gdrive_local_mirror_dir,
+                        include_assets=True,
+                    )
+                    logger.info(f"✨ [자동 훅] Google Drive 데스크톱 폴더 자동 동기화 완료: {sync_res}")
+
+                # 3. Google Drive API가 설정되어 있고 활성화된 경우 원격 업로드 시도
+                elif storage.is_api_configured:
+                    try:
+                        push_res = storage.push_all_to_gdrive_api(wiki_db_dir=wiki_db_dir, upload_assets=True)
+                        logger.info(f"✨ [자동 훅] Google Drive API 원격 동기화 완료: {push_res}")
+                    except Exception as api_err:
+                        logger.debug(f"원격 API 자동 푸시 스킵 또는 오류 (로컬 번들 유지): {api_err}")
+            except Exception as e:
+                logger.warning(f"인제스트 후 Google Drive 자동 동기화 훅 처리 중 오류 (인제스트는 정상 완료): {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def scan_now(self) -> tuple[int, int]:
         """Source 폴더의 모든 파일을 즉시 검사하여 신규 파일을 변환한다. (성공건수, 스킵건수 반환)"""
         # 고착된 processing 좀비 항목 자동 정리
@@ -195,6 +253,10 @@ class IngestAgent:
                     processed_count += 1
                 else:
                     skipped_count += 1
+
+        if processed_count > 0:
+            self._trigger_auto_sync("batch_scan", None)
+
         return processed_count, skipped_count
 
     def start(self) -> None:

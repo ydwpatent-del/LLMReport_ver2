@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.manifest import ManifestManager
 from app.kordoc_wiki_agent import KordocWikiAgent
 from app.ingest_agent import IngestAgent
+from app.audit_agent import AuditAgent
 from app.server import create_app
 
 # 로깅 설정
@@ -43,7 +44,7 @@ def main():
     # 2. 실시간 파일 감시 에이전트 백그라운드 시작
     agent.start()
 
-    # 3. 초기 스캔을 백그라운드 스레드로 비동기 실행 (웹 서버가 즉시 기동되도록 보장)
+    # 3. 초기 스캔 및 기존 마크다운 무결성 검사/자율 치유를 백그라운드 스레드로 비동기 실행
     def async_initial_scan():
         logger.info("🔍 Source 폴더 초기 동기화 스캔 실행 중 (백그라운드)...")
         proc_cnt, skip_cnt = agent.scan_now()

@@ -129,8 +129,8 @@ def test_pdf_file_api_cleanup_on_failure(tmp_path: Path):
         mock_client.files.delete.assert_called_once_with(name="files/test_temp_file_id")
 
 
-def test_chat_session_used_for_chunked_docs(tmp_path: Path):
-    """25,000자를 초과하여 분할 처리되는 대형 문서에 대해 단일 Chat Session을 유지하며 처리하는지 검증한다."""
+def test_stateless_generate_content_used_for_chunked_docs(tmp_path: Path):
+    """분할 처리되는 대형 문서에 대해 히스토리 누적 없이 청크별 독립 generate_content 호출 및 하트비트가 수행되는지 검증한다."""
     docs_dir = tmp_path / "docs"
     assets_dir = tmp_path / "assets"
     agent = KordocWikiAgent(docs_dir=docs_dir, assets_dir=assets_dir, api_key="fake-api-key")
@@ -142,13 +142,15 @@ def test_chat_session_used_for_chunked_docs(tmp_path: Path):
     assert len(raw_md) > 25000
 
     mock_client = MagicMock()
-    mock_chat = MagicMock()
     mock_response_1 = MagicMock()
     mock_response_1.text = "# 변환 결과 1"
     mock_response_2 = MagicMock()
     mock_response_2.text = "## 변환 결과 2"
-    mock_chat.send_message.side_effect = [mock_response_1, mock_response_2]
-    mock_client.chats.create.return_value = mock_chat
+    mock_response_3 = MagicMock()
+    mock_response_3.text = "### 변환 결과 3"
+    mock_client.models.generate_content.side_effect = [mock_response_1, mock_response_2, mock_response_3]
+
+    heartbeat_calls = []
 
     with patch("google.genai.Client", return_value=mock_client):
         result = agent._call_llm_for_wiki_ingest(
@@ -156,14 +158,16 @@ def test_chat_session_used_for_chunked_docs(tmp_path: Path):
             doc_id="test_chunked_doc",
             original_filename="대형문서.md",
             file_hash="hash_chunked_123",
-            images_info=[]
+            images_info=[],
+            heartbeat_cb=lambda: heartbeat_calls.append(1)
         )
 
         assert result is not None
         assert "# 변환 결과 1" in result
         assert "## 변환 결과 2" in result
-        mock_client.chats.create.assert_called_once()
-        assert mock_chat.send_message.call_count >= 2
+        mock_client.chats.create.assert_not_called()
+        assert mock_client.models.generate_content.call_count >= 2
+        assert len(heartbeat_calls) >= 2
 
 
 def test_validate_and_fix_image_links(tmp_path: Path):
@@ -240,14 +244,11 @@ def test_abnormal_chunk_does_not_discard_previous_results(tmp_path):
     mock_response_bad = MagicMock()
     mock_response_bad.text = "X" * 30001
 
-    mock_chat = MagicMock()
-    mock_chat.send_message.side_effect = [mock_response_ok, mock_response_bad]
-
     raw_md = "## 섹션 1\n" + ("내용. " * 1400) + "\n\n## 섹션 2\n" + ("내용. " * 1400)
 
     with patch("google.genai.Client") as mock_client_cls:
         mock_client = MagicMock()
-        mock_client.chats.create.return_value = mock_chat
+        mock_client.models.generate_content.side_effect = [mock_response_ok, mock_response_bad]
         mock_client_cls.return_value = mock_client
 
         result = agent._call_llm_for_wiki_ingest(
@@ -260,6 +261,127 @@ def test_abnormal_chunk_does_not_discard_previous_results(tmp_path):
 
     assert result is not None, "비정상 청크 1개로 인해 전체 결과가 폐기되었습니다"
     assert "섹션 1 변환 결과" in result
+
+
+def test_truncated_llm_output_is_rejected_and_falls_back(tmp_path):
+    """원본 청크가 충분히 긴데 LLM 응답이 목차 작성 도중 조기 절단된 경우
+    정상 변환으로 오인하지 않고 None을 반환(룰베이스 폴백 유도)하는지 검증."""
+    from unittest.mock import MagicMock, patch
+    from app.kordoc_wiki_agent import KordocWikiAgent
+
+    agent = KordocWikiAgent(
+        docs_dir=tmp_path / "docs",
+        assets_dir=tmp_path / "assets",
+        api_key="fake-key"
+    )
+
+    truncated_resp = MagicMock()
+    truncated_resp.text = (
+        "# [이슈브리프]AI 추론 효율화를 위한 HBF의 등장\n"
+        "> - **원본 파일명**: test.pdf\n"
+        "---\n\n"
+        "## 목차\n"
+        "- [AI 추론 효율화를 위한 HBF의 등장](#ai-추"
+    )
+
+    raw_md = "# AI 추론 효율화를 위한 HBF의 등장\n\n" + ("본문 상세 단락 텍스트입니다. " * 200)
+
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = truncated_resp
+        mock_client_cls.return_value = mock_client
+
+        result = agent._call_llm_for_wiki_ingest(
+            raw_md=raw_md,
+            doc_id="test_hbf",
+            original_filename="test.pdf",
+            file_hash="hash123",
+            images_info=[]
+        )
+
+    assert result is None, "조기 절단된 불완전 LLM 출력이 정상 결과로 채택되었습니다."
+
+
+def test_large_pdf_chunked_parsing_preserves_image_paths_and_context(tmp_path: Path):
+    """100페이지 이상 대형 PDF 분할 파싱 시:
+    1) p1_image_001.png 경로가 이중 치환(/p1_/api/assets/...)되지 않아야 하며,
+    2) extracted_images_info에 문맥(context_before/after/nearest_heading)이 보존되어
+       본문 말미 덤프가 아닌 원래 문맥 위치에 정확히 재주입되는지 검증."""
+    import struct
+    from unittest.mock import MagicMock, patch
+    from app.kordoc_wiki_agent import KordocWikiAgent
+
+    docs_dir = tmp_path / "docs"
+    assets_dir = tmp_path / "assets"
+    agent = KordocWikiAgent(docs_dir=docs_dir, assets_dir=assets_dir, api_key=None)
+
+    pdf_file = tmp_path / "large_report.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4 dummy large pdf")
+
+    ihdr_valid = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">LL", 800, 600)
+    valid_png_bytes = ihdr_valid + b"\x00" * 15000
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        import re
+        m = re.search(r'-o\s+"([^"]+)"', cmd)
+        if m:
+            out_file = Path(m.group(1))
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            img_dir = out_file.parent / "images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            (img_dir / "image_001.png").write_bytes(valid_png_bytes)
+            out_file.write_text(
+                "## 1. AI 반도체 시장 현황\n\n"
+                "전 세계 AI 반도체 시장 규모 추이 설명 문단입니다.\n\n"
+                "![도표 1](images/image_001.png)\n\n"
+                "후속 단락 설명 텍스트가 이어집니다.\n\n"
+                "## 2. 결론 및 시사점\n\n"
+                "마무리 결론 텍스트입니다.\n",
+                encoding="utf-8"
+            )
+        res = MagicMock()
+        res.returncode = 0
+        return res
+
+    # LLM이 변환 중 이미지 태그를 누락한 상황 시뮬레이션 (스크린샷의 '💉 LLM 누락 이미지' 상황)
+    llm_output_without_img = (
+        "# large_report\n"
+        "> - **원본 파일명**: large_report.pdf\n"
+        "> - **발행기관**: 기관\n"
+        "> - **무결성 해시 (SHA-256)**: largehash123\n"
+        "> - **데이터 보존 원칙**: 100% 무삭제 완본\n"
+        "---\n\n"
+        "## 목차\n"
+        "- [1. AI 반도체 시장 현황](#1-ai-반도체-시장-현황)\n"
+        "- [2. 결론 및 시사점](#2-결론-및-시사점)\n\n"
+        "---\n\n"
+        "## 1. AI 반도체 시장 현황\n\n"
+        "전 세계 AI 반도체 시장 규모 추이 설명 문단입니다.\n\n"
+        "후속 단락 설명 텍스트가 이어집니다.\n\n"
+        "## 2. 결론 및 시사점\n\n"
+        "마무리 결론 텍스트입니다.\n"
+    )
+
+    with patch("app.kordoc_wiki_agent.get_pdf_page_count", return_value=100):
+        with patch("subprocess.run", side_effect=fake_subprocess_run):
+            with patch.object(agent, "_call_llm_for_wiki_ingest", return_value=llm_output_without_img):
+                target_md, images, title = agent.execute_ingest(
+                    source_path=pdf_file,
+                    doc_id="large_doc_001",
+                    file_hash="largehash123",
+                    skip_lint=True
+                )
+
+    content = target_md.read_text(encoding="utf-8")
+    assert "/api/assets/large_doc_001/p1_image_001.png" in content
+
+    # 이미지가 문서 맨 끝(## 2. 결론 및 시사점 뒤)에 말미 덤프되지 않고, 원래 문맥(## 1. AI 반도체 시장 현황 내부)에 재주입되어야 함
+    pos_img = content.find("/api/assets/large_doc_001/p1_image_001.png")
+    pos_sec2 = content.find("## 2. 결론 및 시사점")
+    assert pos_img != -1 and pos_sec2 != -1
+    assert pos_img < pos_sec2, f"누락 이미지가 문맥 정보 부재로 인해 문서 말미(섹션 2 뒤)로 일괄 덤프되었습니다:\n{content}"
+
+
 
 
 

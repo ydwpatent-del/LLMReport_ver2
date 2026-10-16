@@ -159,3 +159,35 @@ def test_get_all_documents_deduplicates_alias_entries(tmp_path: Path):
     completed = [d for d in docs if d.status == "completed" and d.file_hash == base.file_hash]
     assert len(completed) == 1, f"alias 중복 포함됨: {[d.id for d in completed]}"
     assert completed[0].id == "new_id"
+
+
+def test_touch_processing_prevents_zombie_timeout(tmp_path: Path):
+    """대형 문서 처리 중 touch_processing 호출 시 ingested_at이 갱신되어 좀비 판정 및 중복 재파싱이 방지되는지 검증한다."""
+    manifest_file = tmp_path / "manifest.json"
+    manager = ManifestManager(manifest_file)
+
+    doc = DocumentEntry(
+        id="large_doc_1",
+        original_filename="large_report.pdf",
+        source_path="Source/large_report.pdf",
+        file_hash="large_hash_999",
+        file_size=5000000,
+        modified_time=1700000000.0,
+        target_md_path="",
+        assets_dir="",
+        status="processing",
+        ingested_at="2020-01-01T00:00:00+00:00",
+        title="대형 보고서"
+    )
+    manager.add_or_update_document(doc)
+
+    # 하트비트 갱신 전에는 600초 경과로 중복이 아닌 것(False)으로 판정됨
+    assert manager.is_duplicate("large_hash_999") is False
+
+    # 하트비트 갱신 실행
+    manager.touch_processing("large_doc_1")
+
+    # 하트비트 갱신 후에는 활성 processing 상태로 인정되어 중복 재시작(True)이 차단되고 좀비 정리에서도 제외됨
+    assert manager.is_duplicate("large_hash_999") is True
+    assert manager.cleanup_zombie_processing(timeout_seconds=600) == 0
+

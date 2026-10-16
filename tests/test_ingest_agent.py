@@ -153,3 +153,42 @@ def test_process_file_except_does_not_raise_name_error(tmp_path):
     result = agent.process_file(src, debounce=0.0)
     assert result is False
 
+
+def test_ingest_agent_auto_sync_hook(tmp_path: Path):
+    """신규 파일 인제스트 성공 시 텍스트 번들이 자동으로 생성/갱신되는지 검증한다."""
+    source_dir = tmp_path / "Source"
+    wiki_db = tmp_path / "WikiDB"
+    docs_dir = wiki_db / "docs"
+    assets_dir = wiki_db / "assets"
+    manifest_path = wiki_db / "manifest.json"
+
+    source_dir.mkdir(parents=True)
+    docs_dir.mkdir(parents=True)
+    assets_dir.mkdir(parents=True)
+
+    manifest_mgr = ManifestManager(manifest_path)
+    engine = KordocEngine(docs_dir, assets_dir)
+    agent = IngestAgent(
+        source_dir=source_dir,
+        manifest_mgr=manifest_mgr,
+        engine=engine,
+        supported_exts={".txt", ".md"},
+        auto_sync_gdrive=True,
+    )
+
+    doc_file = source_dir / "auto_sync_test.md"
+    doc_file.write_text("# 자동 동기화 훅 테스트\n본문 내용입니다.", encoding="utf-8")
+
+    processed, _ = agent.scan_now()
+    assert processed == 1
+
+    # 비동기 스레드 작업 완료 대기 (최대 1.5초)
+    bundle_path = wiki_db / "wiki_text_bundle.zip"
+    for _ in range(30):
+        if bundle_path.exists() and bundle_path.stat().st_size > 0:
+            break
+        time.sleep(0.05)
+
+    assert bundle_path.exists()
+    assert bundle_path.stat().st_size > 0
+

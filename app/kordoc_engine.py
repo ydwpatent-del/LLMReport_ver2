@@ -163,15 +163,9 @@ class KordocEngine:
             
             # shell=False + 리스트 인자 방식으로 명령어 인젝션 방지
             npx_path = shutil.which("npx") or "npx"
-            if sys.platform == "win32":
-                # Windows: .cmd 래퍼는 cmd를 통해 실행해야 한다
-                base_args = ["cmd", "/c", npx_path, "-y", "kordoc@^4",
-                             str(source_path.resolve()),
-                             "-o", str(temp_out_md.resolve())]
-            else:
-                base_args = [npx_path, "-y", "kordoc@^4",
-                             str(source_path.resolve()),
-                             "-o", str(temp_out_md.resolve())]
+            base_args = [npx_path, "-y", "kordoc@^4",
+                         str(source_path.resolve()),
+                         "-o", str(temp_out_md.resolve())]
 
             if enable_ocr:
                 base_args += ["--ocr", "--formula-ocr"]

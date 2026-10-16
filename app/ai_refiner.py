@@ -16,6 +16,8 @@ class AIRefiner:
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
+            logger.warning("GEMINI_API_KEY 환경변수가 설정되지 않았습니다. LLM 기반 정돈 기능이 비활성화됩니다.")
 
     def _extract_metadata_info(self, text: str, filename: str) -> dict:
         """문서 텍스트와 파일명으로부터 발행기관, 발행일자, 엔티티 태그, 분류를 추출한다."""

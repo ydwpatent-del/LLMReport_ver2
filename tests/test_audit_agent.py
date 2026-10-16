@@ -225,3 +225,135 @@ def test_backup_manager_default_path_is_absolute(tmp_path):
         f"backup_dir이 절대 경로가 아닙니다: {auditor.backup_mgr.backup_dir}"
 
 
+def test_audit_and_heal_single_recovers_truncated_doc_from_valid_backup(tmp_path: Path):
+    """현재 마크다운이 조기 절단(1.5KB)되어 있고 재인제스트도 절단된 결과를 반환할 때,
+    백업 폴더 내의 완본 스냅샷을 복원하고 표 파손까지 치유하여 정상 완본으로 복구하는지 검증."""
+    from app.manifest import DocumentEntry
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    backup_dir = docs_dir / ".backup"
+    backup_dir.mkdir()
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    # 3페이지짜리 원문 PDF 생성
+    pdf_path = source_dir / "hbf_brief.pdf"
+    doc = pymupdf.open()
+    for p_idx in range(3):
+        p = doc.new_page()
+        p.insert_text((50, 100), f"Page {p_idx+1} HBF High Bandwidth Flash memory architecture content detail.")
+    doc.save(str(pdf_path))
+    doc.close()
+
+    # 현재 디스크의 마크다운은 목차에서 잘린 200자 파손본
+    md_path = docs_dir / "doc_hbf.md"
+    md_path.write_text(
+        "# HBF의 등장\n> - **원본 파일명**: hbf_brief.pdf\n---\n## 목차\n- [HBF](#hbf-",
+        encoding="utf-8"
+    )
+
+    # 백업 폴더에는 본문 전체가 다 들어있지만 표 중간에 줄바꿈 파손만 있던 완본 백업이 존재
+    full_backup_content = (
+        "# HBF의 등장\n"
+        "> - **원본 파일명**: hbf_brief.pdf\n"
+        "> - **발행기관**: 산업기술리서치센터\n"
+        "> - **무결성 해시 (SHA-256)**: hash123\n"
+        "> - **데이터 보존 원칙**: 100% 무삭제 완본\n"
+        "---\n\n"
+        "## 1. HBF 개요\n\n"
+        "Page 1 HBF High Bandwidth Flash memory architecture content detail.\n\n"
+        "Page 2 HBF High Bandwidth Flash memory architecture content detail.\n\n"
+        "## 2. 계층 비교\n\n"
+        "Page 3 HBF High Bandwidth Flash memory architecture content detail.\n\n"
+        "| 구분 | As-Is | 구분 | To-Be |\n"
+        "|:---|:---|:---|:---|\n"
+        "| HBM | Hot 데이터 | HBM | Hot 데이터 |\n"
+        "| \n\n"
+        "| | | Warm 데이터 일부 |\n"
+        "| - | 성능 공백 | HBF | Warm 데이터 |\n"
+    )
+    (backup_dir / "doc_hbf_20260928_104324.bak.md").write_text(full_backup_content, encoding="utf-8")
+
+    entry = DocumentEntry(
+        id="doc_hbf",
+        original_filename="hbf_brief.pdf",
+        source_path=str(pdf_path),
+        file_hash="hash123",
+        file_size=1000,
+        modified_time=1.0,
+        target_md_path=str(md_path),
+        assets_dir="",
+        status="completed",
+        title="HBF의 등장"
+    )
+    mock_manifest = MagicMock()
+    mock_manifest.get_document.return_value = entry
+
+    # 엔진 재인제스트가 또다시 200자짜리 절단된 결과를 덮어쓰는 상황 시뮬레이션
+    mock_engine = MagicMock()
+    def fake_bad_ingest(source_path, doc_id, file_hash, skip_lint=False):
+        md_path.write_text("# HBF의 등장\n## 목차\n- [잘림](#", encoding="utf-8")
+        return md_path, [], "HBF의 등장"
+    mock_engine.execute_ingest.side_effect = fake_bad_ingest
+
+    auditor = AuditAgent(docs_dir=docs_dir, backup_dir=backup_dir)
+    success, msg, _ = auditor.audit_and_heal_single(
+        doc_id="doc_hbf",
+        manifest_mgr=mock_manifest,
+        engine=mock_engine,
+        source_dir=source_dir,
+        docs_dir=docs_dir
+    )
+
+    assert success is True
+    healed_text = md_path.read_text(encoding="utf-8")
+    post_report = auditor.audit_document("doc_hbf", pdf_path, md_path)
+    assert post_report.is_healthy is True, f"치유 후에도 결함이 남아있습니다: {post_report.red_flags}, {post_report.missing_sections}"
+
+
+def test_audit_document_handles_pdf_unspaced_text_without_false_positives(tmp_path: Path):
+    """PDF에서 글자 간 공백이 없이 추출된 단락이더라도, 마크다운 본문에 정상 띄어쓰기로
+    존재하는 경우 누락 단락(missing_sections)으로 오탐하지 않는지 검증."""
+    pdf_path = tmp_path / "unspaced.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+
+    # PDF에서 단락 내 일부 어절이 붙어서 추출되는 복합 단락 시뮬레이션
+    unspaced_text = "• AI 개발속도는인간의추종을불허하는수준. 단순진보가아닌압축적도약이현실화. GPU 컴퓨팅효율화 3배."
+    page.insert_text((50, 100), unspaced_text, fontsize=11)
+    doc.save(str(pdf_path))
+    doc.close()
+
+    # 마크다운 본문에는 정상적인 한국어 띄어쓰기로 복원된 경우
+    valid_spaced_md = (
+        "# AI 현황 보고서\n\n"
+        "> - **원본 파일명**: unspaced.pdf\n"
+        "> - **발행기관**: 리서치센터\n"
+        "> - **발행일자**: 2026년 01월 01일\n"
+        "> - **문서분류**: 리서치 보고서\n"
+        "> - **핵심 엔티티**: #AI #GPU\n"
+        "> - **원본형식**: PDF (100% 무삭제 전수 인제스트)\n"
+        "> - **인제스트 일시**: 2026-01-01 00:00:00 UTC\n"
+        "> - **무결성 해시 (SHA-256)**: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\n"
+        "> - **데이터 보존 원칙**: 100% 무삭제 완본 (Full-Text Ingestion)\n"
+        "---\n\n"
+        "## I. 개요\n\n"
+        "• AI 개발 속도는 인간의 추종을 불허하는 수준. 단순 진보가 아닌 압축적 도약이 현실화. GPU 컴퓨팅 효율화 3배.\n"
+    )
+    md_path = tmp_path / "test_unspaced.md"
+    md_path.write_text(valid_spaced_md, encoding="utf-8")
+
+    agent = AuditAgent(docs_dir=tmp_path, backup_dir=tmp_path / ".backup")
+    report = agent.audit_document(
+        doc_id="test_unspaced",
+        source_path=pdf_path,
+        md_path=md_path
+    )
+
+    assert len(report.missing_sections) == 0, f"정상 본문이 누락으로 오탐되었습니다: {report.missing_sections}"
+    assert report.is_healthy is True
+
+
+
+

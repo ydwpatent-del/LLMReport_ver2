@@ -1,0 +1,10 @@
+{
+  "name": "LLM Wiki 지식 대시보드",
+  "short_name": "LLM Wiki",
+  "description": "스마트폰 및 PC 연동 LLM Wiki 열람, 검색 및 AI 주제 보고서 생성 웹앱",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#1e293b",
+  "orientation": "any"
+}

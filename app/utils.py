@@ -483,6 +483,14 @@ def validate_red_flags(markdown_text: str, check_metadata: bool = True) -> list[
         if not has_separator:
             flags.append(f"표 문법 파손: 구분선(|---|) 없는 고립된 표 블록 감지 ('{table_block[0][:30]}')")
 
+    # 4-1. 개행 누락으로 본문/출처와 결합되어 파손된 표 헤더 감지 (중첩 수량자 제거로 ReDoS 방지)
+    malformed_table_headers = re.findall(
+        r'(?:^|\n)(?!\s*\|)([^\n|]+)(\|[^\n]*\n[ \t]*\|(?:[ \t]*:?-{2,}:?[ \t]*\|)+[ \t]*(?=\n|$))',
+        markdown_text
+    )
+    if malformed_table_headers:
+        flags.append(f"표 문법 파손: 개행 누락으로 본문/출처와 결합된 파손 표 헤더 감지 ({len(malformed_table_headers)}건)")
+
     # 5. 무맥락 이미지 연속 덤프(Dump) 감지 (설명 없이 연속된 이미지 태그)
     if re.search(r'!\[.*?\]\([^\)]+\)\s*\n+\s*!\[.*?\]\([^\)]+\)', markdown_text):
         flags.append("Visual Context Inlining 위반: 설명 문맥 없는 이미지 연속 덤프 감지")
@@ -495,39 +503,248 @@ def validate_red_flags(markdown_text: str, check_metadata: bool = True) -> list[
     if re.search(r'^[○◦●◇◆▶▷]\s+', markdown_text, re.MULTILINE):
         flags.append("불릿 들여쓰기 위반: 2단계 불릿('○')의 들여쓰기(2칸) 누락")
 
-    # 7. 각주 인라인 미분리 감지 (본문 단락 내에 각주 정의 잔존)
-    body_part = markdown_text.split("### 📌 각주")[0] if "### 📌 각주" in markdown_text else markdown_text
+    # 7. 각주 인라인 미분리 및 중복 감지
+    body_part = re.split(r'^\s*#{2,4}\s*(?:📌\s*)?(?:각주|Footnotes?)\b', markdown_text, flags=re.IGNORECASE | re.MULTILINE)[0]
     if re.search(r'^\s*[-*+]?\s*\d+\)\s*[^:\n]{2,20}:\s*.+', body_part, re.MULTILINE):
         flags.append("각주 서식 위반: 본문 내 인라인 각주 미분리 잔존")
+    if re.search(r'^\s*\[\^(\d+)\]:\s*.+', body_part, re.MULTILINE):
+        flags.append("각주 서식 위반: 본문 내 각주 정의 미분리 잔존")
+
+    # 전체 문서에서 각주 번호 중복 정의 검사
+    all_fn_defs = re.findall(r'^\s*\[\^(\d+)\]:\s*', markdown_text, re.MULTILINE)
+    if len(all_fn_defs) != len(set(all_fn_defs)):
+        flags.append(f"각주 서식 위반: 각주 정의 중복 삽입 ({len(all_fn_defs) - len(set(all_fn_defs))}건 중복)")
 
     return flags
 
 
+def heal_markdown_table_boundaries(markdown_text: str) -> str:
+    """마크다운 표(Table)의 시작 전과 종결 후 빈 줄(\n\n)을 보장하고,
+    표 직후에 붙은 캡션/출처 및 인라인 도표 이미지를 독립된 문단으로 안전하게 분리한다.
+
+    1. 코드 블록(```) 내부의 텍스트는 온전히 보존.
+    2. 인라인 복합 태그 분리:
+       `<출처:...>![이미지](url)` 또는 `*(캡션)*![이미지](url)` 와 같이 한 줄에 붙은
+       이미지 태그를 `\n\n![이미지](url)` 로 분리하여 독립 이미지 문단으로 격리.
+    3. 닫는 파이프 없이 줄바꿈되어 두 동강 난 표 행(| 셀1\n\n| 셀2 |...) 자동 봉합.
+    4. 개행 누락으로 앞 일반 텍스트/캡션에 붙어버린 표 헤더만 표준 줄바꿈(\n\n)으로 분리 복원.
+    5. 표 종결 경계 분리 (Table Terminator Healing):
+       표 데이터 행(| ... |) 직후 빈 줄 없이 이어지는 일반 텍스트/캡션/출처/이미지 행 사이에
+       반드시 빈 줄(\n\n)을 삽입하여 GFM 파서가 표 밖의 요소를 표 내부 셀(<td>)로
+       오인 흡수하는 결함을 완벽히 차단.
+    """
+    if not markdown_text:
+        return markdown_text
+
+    # 1. 코드 블록 보호 및 플레이스홀더 치환
+    code_blocks = []
+    def save_code_block(m):
+        code_blocks.append(m.group(0))
+        return f"<!--CODE_BLOCK_PLACEHOLDER_{len(code_blocks)-1}-->"
+
+    text = re.sub(r'```[\s\S]*?```', save_code_block, markdown_text)
+
+    # 2. 인라인 복합 태그 및 개행 누락 문단/헤딩 분리:
+    # 2-0) 중첩된 <출처: [A](urlA), <출처: [B](urlB)>> 비정상 태그 단일 <출처: [A](urlA), [B](urlB)>로 평탄화
+    def flatten_nested_citation(m):
+        full = m.group(0)
+        items = re.findall(r'\[((?:\[[^\]]*\]|[^\]])+)\]\(([^)]+)\)', full)
+        if items:
+            return "<출처: " + ", ".join(f"[{t}]({l})" for t, l in items) + ">"
+        return full
+
+    text = re.sub(
+        r'<출처\s*:\s*\[(?:\[[^\]]*\]|[^\]])+\]\([^)]+\)(?:,\s*<출처\s*:\s*\[(?:\[[^\]]*\]|[^\]])+\]\([^)]+\))+>',
+        flatten_nested_citation,
+        text
+    )
+
+    # 2-1) <출처:...> 또는 *(...)* 직후에 공백 없이 바로 붙은 ![...](...) 이미지 태그 분리
+    text = re.sub(r'([>)]|\*(?:[^*]+)\*)\s*(!\[[^\n\]]*\]\([^\n\)]+\))', r'\1\n\n\2', text)
+    # 2-2) 도표 캡션(*(도표:...)*) 앞의 불필요한 공백/들여쓰기 제거
+    text = re.sub(r'(!\[.*?\]\([^\)]+\)\s*\n)[ \t]+(\*\([^\n]+\)\*)', r'\1\2', text)
+    # 2-3) 출처 태그 직후 표 헤더, 헤딩(###), 목록(*, -, +), 볼드 소제목이 바로 붙은 경우 빈 줄(\n\n)로 격리
+    # 일반 문단 끝(비-표 행)에 달라붙은 표 헤더는 빈 줄(\n\n)로 확실히 분리하고, 표 내부 셀의 닫는 파이프(>|)는 온전히 보존
+    text = re.sub(r'((?:^|\n)(?!\s*\|)[^\n]+?<출처\s*:[^>]+>)[ \t]*(\|[^\n]+\|)', r'\1\n\n\2', text)
+    text = re.sub(r'(<출처\s*:[^>]+>)[ \t]*(#{1,6}\s+)', r'\1\n\n\2', text)
+    text = re.sub(r'(<출처\s*:[^>]+>)[ \t]*([*+-]\s+)', r'\1\n\n\2', text)
+    text = re.sub(r'(<출처\s*:[^>]+>)[ \t]*(\*\*[^\n*]+\*\*)', r'\1\n\n\2', text)
+    text = re.sub(r'(<출처\s*:[^>]+>\.?)[ \t]*(#{1,6}\s+|[*+-]\s+|\|[^\n]+\|)', r'\1\n\n\2', text)
+    # 2-4) 캡션 닫는 ')*' 직후 공백/개행 없이 헤딩(###)이 이어지는 경우 빈 줄(\n\n)로 분리
+    text = re.sub(r'(\*\([^\n]+\)\*)[ \t]*(#{1,6}\s+)', r'\1\n\n\2', text)
+    # 2-5) 출처 태그, 마침표, 일반 본문 직후에 개행 없이 인라인으로 붙어버린 모든 헤딩(#{1,6} ) 앞에 빈 줄(\n\n) 강제 분리
+    text = re.sub(r'([^\n#])[ \t]*(#{1,6}\s+[^\n]+)', r'\1\n\n\2', text)
+
+    # 3. 닫는 파이프 없이 줄바꿈되어 두 동강 난 표 행(| 셀1\n\n| 셀2 |...) 자동 봉합
+    text = re.sub(
+        r'(^|\n)[ \t]*\|([^|\n]*)\n+[ \t]*(\|(?:[^|\n]*\|)+)',
+        r'\1|\2 \3',
+        text
+    )
+
+    # 4-1. 표 헤더 행과 구분 행 사이에 빈 줄(\n\n)이 끼어 깨진 표 봉합
+    text = re.sub(
+        r'((?:^|\n)[ \t]*\|[^\n]+\|[ \t]*)\n+[ \t]*(\|(?:[ \t]*:?-{2,}:?[ \t]*\|)+[ \t]*(?=\n|$))',
+        r'\1\n\2',
+        text
+    )
+
+    # 4-2. 개행 누락 또는 단일 개행으로 앞 일반 텍스트나 출처/캡션에 붙어버린 표 헤더만 표준 빈 줄(\n\n)로 분리 복원
+    text = re.sub(
+        r'((?:^|\n)(?!\s*\|)[^\n|]+?)[ \t]*\n?((?:\|[^|\n]+)+\|[ \t]*\n[ \t]*\|(?:[ \t]*:?-{2,}:?[ \t]*\|)+[ \t]*(?=\n|$))',
+        r'\1\n\n\2',
+        text
+    )
+
+    # 5. 표 종결 경계 분리:
+    # 표 데이터 행(| ... |) 직후 빈 줄 없이 비-표 행(파이프로 시작하지 않는 줄)이 올 때 빈 줄(\n\n) 삽입
+    lines = text.split('\n')
+    healed_lines = []
+    in_table = False
+
+    def is_table_row(line_str: str) -> bool:
+        s = line_str.strip()
+        return s.startswith('|') and s.endswith('|') and len(s) >= 2
+
+    for line in lines:
+        stripped = line.strip()
+        if is_table_row(line):
+            in_table = True
+            healed_lines.append(line)
+        else:
+            if in_table:
+                in_table = False
+                if stripped != '':
+                    # 표가 끝난 직후 행이 빈 줄이 아니면 빈 줄 삽입하여 표 종결
+                    healed_lines.append('')
+            healed_lines.append(line)
+
+    healed_text = '\n'.join(healed_lines)
+
+    # 6. 코드 블록 복원
+    for idx, block in enumerate(code_blocks):
+        healed_text = healed_text.replace(f"<!--CODE_BLOCK_PLACEHOLDER_{idx}-->", block)
+
+    return healed_text
+
+
 def clean_markdown_typography(markdown_text: str) -> str:
     """마크다운 본문의 불릿 기호를 네모(□) - 동그라미(○) - 하이픈(-) 체계로 통일하고,
-    본문 중간에 혼입된 각주 설명을 분리하여 표준 GFM 각주([^1])로 정돈한다.
+    본문 중간에 혼입되거나 중복 삽입된 각주 설명을 전수 수거하여 문서 최하단 표준 GFM 각주([^1])로 일원화한다.
     
     1. 불릿 기호 체계 통일 (이중 기호 제거):
        - 1단계(대항목): □ (네모)
        - 2단계(중항목): ○ (동그라미) — '- ○' 이중기호에서 앞선 '- '를 제거하여 순수 '○ '로 복원
        - 3단계(소항목): - (하이픈) — '- -' 중복 하이픈을 단일 '- '로 정돈
     
-    2. 각주 표준 분리 (Option A - GFM 각주 문법):
-       - 본문 단락 사이에 끼어있는 각주 정의('- 1) 용어: 설명' 등)를 감지 및 본문에서 분리
-       - 본문 텍스트 내의 '단어1)' 인용부를 표준 '단어[^1]'로 치환
-       - 분리된 각주를 문서 최하단에 [^1]: **용어**: 설명 블록으로 깔끔하게 배치
+    2. 각주 표준 분리 및 중복 제거 (Option A - GFM 각주 문법):
+       - 본문 단락 또는 표 사이에 끼어있는 각주 정의('- 1) 용어: 설명' 및 '[^1]: **용어**: 설명' 등)를 전수 감지 및 수거
+       - 본문 중간 및 말단에 중복 기재된 동일 번호 각주를 최고 품질의 설명으로 단일 통합(Deduplication)
+       - 본문 텍스트 내의 '단어1)' 인용부를 표준 '단어[^1]'로 치환 (기존 '[^1]' 인용부는 온전히 보존)
+       - 분리 및 통합된 모든 각주를 문서 최하단에 번호 오름차순의 [^1]: **용어**: 설명 단일 블록으로 일원화
        - Zero Information Loss 원칙: 원본 텍스트 및 각주 내용을 100% 무손실 보존
     """
     if not markdown_text:
         return markdown_text
 
-    lines = markdown_text.split('\n')
+    # 0. 마크다운 표 시작 및 종결 경계 자율 치유 (두 동강 난 표 행 봉합 및 헤더/종결 분리 통합)
+    markdown_text = heal_markdown_table_boundaries(markdown_text)
+
+    # 0-3. 본문 내 설명 문맥 없이 연속으로 나열된 이미지 태그들에 대해
+    # 각 이미지의 alt 텍스트를 기반으로 시각적 캡션(*(도표: {설명})*)을 부여하여
+    # Visual Context Inlining 완성 및 무맥락 연속 덤프 결함 자율 치유
+    consecutive_pat = re.compile(
+        r'(!\[(.*?)\]\(([^\)]+)\))(?:\s*\n)+\s*(?=!\[.*?\]\([^\)]+\))'
+    )
+    if consecutive_pat.search(markdown_text):
+        def repl_img_block(match):
+            tag = match.group(1)
+            alt = match.group(2).strip()
+            desc = alt
+            desc_match = re.search(r'\((.*?)\)', alt)
+            if desc_match:
+                desc = desc_match.group(1).strip()
+            caption = f"*(도표: {desc})*" if desc else "*(도표/인포그래픽)*"
+            return f"{tag}\n{caption}\n\n"
+
+        for _ in range(10):
+            if not consecutive_pat.search(markdown_text):
+                break
+            markdown_text = consecutive_pat.sub(repl_img_block, markdown_text)
+
+        # 연속 블록의 마지막 이미지 태그 뒤에도 캡션이 없는 경우 보완
+        last_in_chain_pat = re.compile(
+            r'(\*\([^\n]+\)\*\s*\n+)(!\[(.*?)\]\(([^\)]+)\))(?!\s*\n\s*\*\(|\s*\n\s*!\[)'
+        )
+        def repl_last_img(m):
+            prev_caption = m.group(1)
+            tag = m.group(2)
+            alt = m.group(3).strip()
+            desc = alt
+            desc_match = re.search(r'\((.*?)\)', alt)
+            if desc_match:
+                desc = desc_match.group(1).strip()
+            caption = f"*(도표: {desc})*" if desc else "*(도표/인포그래픽)*"
+            return f"{prev_caption}{tag}\n{caption}"
+
+        markdown_text = last_in_chain_pat.sub(repl_last_img, markdown_text)
+
+    # 0-2. 과거 버그로 인해 발생한 동일 위계 목록의 들여쓰기 왜곡(첫 항목 0~2칸, 후속 항목 4칸) 사전 치유
+    # 직전에 ○(중항목) 부모가 없는데 첫 항목이 0~2칸 대시이고 후속 항목들이 4칸 대시로 이어진 경우 동일 위계로 평탄화
+    raw_lines = markdown_text.split('\n')
+    healed_raw_lines = []
+    in_dash_block = False
+    first_dash_indent = ''
+    has_circle_parent = False
+
+    for r_line in raw_lines:
+        m_dash_chk = re.match(r'^(\s*)-\s+(.*)$', r_line)
+        if re.match(r'^\s*(?:[-*+]\s*)?[○◦●◇◆▶▷]', r_line):
+            has_circle_parent = True
+            in_dash_block = False
+            first_dash_indent = ''
+            healed_raw_lines.append(r_line)
+            continue
+        if re.match(r'^\s*#{1,6}\s', r_line) or re.match(r'^\s*□', r_line):
+            has_circle_parent = False
+            in_dash_block = False
+            first_dash_indent = ''
+            healed_raw_lines.append(r_line)
+            continue
+
+        if m_dash_chk:
+            cur_indent = m_dash_chk.group(1)
+            cur_content = m_dash_chk.group(2)
+            if not in_dash_block:
+                in_dash_block = True
+                first_dash_indent = cur_indent
+                healed_raw_lines.append(r_line)
+            else:
+                # 직전 부모가 circle이 아닌데 첫 항목이 0~2칸이고 후속 항목이 4칸 이상으로 튀어버린 경우
+                if not has_circle_parent and len(first_dash_indent) <= 2 and len(cur_indent) >= 4:
+                    healed_raw_lines.append(f"{first_dash_indent}- {cur_content}")
+                else:
+                    healed_raw_lines.append(r_line)
+        else:
+            if r_line.strip() != '':
+                in_dash_block = False
+                first_dash_indent = ''
+            healed_raw_lines.append(r_line)
+
+    lines = healed_raw_lines
     cleaned_lines = []
     footnotes = {}  # num -> (term, desc)
 
-    # 각주 정의 행 매칭 패턴:
+    # 1) 일반 텍스트 각주 정의 행 매칭 패턴:
     # 예: '- 1) Transformer: 설명...' 또는 '1) Transformer: 설명...' 또는 '- 1) 설명...'
     footnote_def_pat = re.compile(r'^\s*[-*+]?\s*(\d+)\)\s*(?:([^:\n]+):)?\s*(.+)$')
+
+    # 2) GFM 표준 각주 정의 행 매칭 패턴:
+    # 예: '[^5]: **비즈니스 규칙(Heuristics)**: 설명...' 또는 '[^1]: 용어: 설명...' 또는 '[^1]: 설명...'
+    gfm_footnote_def_pat = re.compile(r'^\s*\[\^(\d+)\]:\s*(?:(?:\*\*([^\*\n]+)\*\*|([^\:\n]+)):\s*)?(.+)$')
+
+    # 3) 기존 각주 섹션 헤더 행 매칭 패턴:
+    footnote_header_pat = re.compile(r'^\s*#{2,4}\s*(?:📌\s*)?(?:각주|Footnotes?)\b.*$', re.IGNORECASE)
 
     # 불릿 정규화 패턴
     empty_square_pat = re.compile(r'^\s*□\s*$')
@@ -535,10 +752,29 @@ def clean_markdown_typography(markdown_text: str) -> str:
     circle_bullet_pat = re.compile(r'^\s*(?:[-*+]\s*)?([○◦●◇◆▶▷])\s*(.*)$')
     dash_bullet_pat = re.compile(r'^(\s*)(?:[-*+]\s*[-*+]|[-*+])\s+(.*)$')
 
+    def register_footnote(n: int, t: str, d: str) -> None:
+        """각주 정의를 딕셔너리에 등록하며, 중복 시 더 상세하고 완전한 내용을 보존한다."""
+        t_clean = t.strip().strip('*').strip()
+        d_clean = d.strip()
+        if n in footnotes:
+            prev_t, prev_d = footnotes[n]
+            # 새 term이 더 유효하고 구체적인 경우 채택
+            best_t = t_clean if (t_clean and (not prev_t or len(t_clean) > len(prev_t))) else prev_t
+            # 더 길고 상세한 설명을 채택
+            best_d = d_clean if len(d_clean) >= len(prev_d) else prev_d
+            footnotes[n] = (best_t, best_d)
+        else:
+            footnotes[n] = (t_clean, d_clean)
+
     current_bullet_level = 0
+    current_dash_indent = ""
 
     for line in lines:
-        # 마크다운 수평선(---, ***, ___ 등 구분선)은 정규화에서 제외하고 그대로 보존
+        # 기존 각주 섹션 헤더는 본문 흐름에서 제거 (문서 최하단에 단일 표준 헤더로 재생성)
+        if footnote_header_pat.match(line):
+            continue
+
+        # 마크다운 수평선(---, ***, ___ 등 구분선)은 일단 보존 (후속 단계에서 고립/중복 정리)
         if re.match(r'^\s*([-*_])(?:\s*\1){2,}\s*$', line):
             cleaned_lines.append(line)
             continue
@@ -547,7 +783,19 @@ def clean_markdown_typography(markdown_text: str) -> str:
         if empty_square_pat.match(line):
             continue
 
-        # 1. 각주 정의 라인 감지 및 수거
+        # 1-1. GFM 표준 각주 정의 라인 감지 및 수거
+        m_gfm = gfm_footnote_def_pat.match(line)
+        if m_gfm:
+            try:
+                num = int(m_gfm.group(1))
+                term = m_gfm.group(2) or m_gfm.group(3) or ""
+                desc = m_gfm.group(4)
+                register_footnote(num, term, desc)
+                continue  # 본문 흐름에서 제거
+            except ValueError:
+                pass
+
+        # 1-2. 일반 텍스트 인라인 각주 정의 라인 감지 및 수거
         m_fn = footnote_def_pat.match(line)
         if m_fn:
             num_str = m_fn.group(1)
@@ -555,45 +803,76 @@ def clean_markdown_typography(markdown_text: str) -> str:
                 num = int(num_str)
                 term = m_fn.group(2).strip() if m_fn.group(2) else ""
                 desc = m_fn.group(3).strip()
-                footnotes[num] = (term, desc)
-                continue  # 본문 흐름에서 제거 (나중에 문서 하단에 GFM 블록으로 재배치)
+                register_footnote(num, term, desc)
+                continue  # 본문 흐름에서 제거
             except ValueError:
                 pass
 
         # 2. 불릿 기호 체계 통일 및 계층형 들여쓰기 반영:
-        #    1단계(대항목): □ (들여쓰기 0칸)
-        #    2단계(중항목):   ○ (들여쓰기 2칸, 이중 기호 '- ○' 금지)
-        #    3단계(소항목):     - (들여쓰기 4칸, 2단계 하위) 또는   - (들여쓰기 2칸, 1단계 직속)
+        #    - 1단계(대항목): □ (들여쓰기 0칸)
+        #    - 2단계(중항목):   ○ (들여쓰기 2칸, 이중 기호 '- ○' 금지)
+        #    - 3단계(소항목):     - (들여쓰기 4칸, 2단계 하위)
+        #    - 일반 마크다운 목록: 동일 위계의 대시(-) 불릿은 첫 항목과 동일한 들여쓰기를 일관되게 유지
         m_sq = square_bullet_pat.match(line)
         if m_sq:
             rest = m_sq.group(2).strip()
             line = f"□ {rest}  "
             current_bullet_level = 1
+            current_dash_indent = ""
         else:
             m_cir = circle_bullet_pat.match(line)
             if m_cir:
                 rest = m_cir.group(2).strip()
                 line = f"  ○ {rest}  "
                 current_bullet_level = 2
+                current_dash_indent = ""
             else:
                 m_dash = dash_bullet_pat.match(line)
                 if m_dash:
                     orig_indent = m_dash.group(1)
                     rest = m_dash.group(2).strip()
-                    # 2단계(○) 아래의 소항목이거나 원본 들여쓰기가 4칸 이상인 경우 4칸 들여쓰기
-                    if current_bullet_level >= 2 or len(orig_indent) >= 4:
+                    # 직전 불릿이 중항목(○, level 2)인 경우 그 하위 소항목으로 4칸 들여쓰기
+                    if current_bullet_level == 2:
                         line = f"    - {rest}  "
                         current_bullet_level = 3
-                    else:
+                        current_dash_indent = "    "
+                    # 이미 소항목(level 3)으로 진행 중인 경우 동일 레벨(4칸) 유지
+                    elif current_bullet_level == 3:
+                        line = f"    - {rest}  "
+                    # 직전 불릿이 대항목(□, level 1)인 경우 직속 하위로 2칸 들여쓰기
+                    elif current_bullet_level == 1:
                         line = f"  - {rest}  "
-                        current_bullet_level = 2
+                        current_dash_indent = "  "
+                    # 대항목이나 중항목이 없는 독립 일반 마크다운 목록인 경우:
+                    # 동일 위계 항목들이 첫 항목 이후 강제 들여쓰기되지 않도록 첫 항목의 들여쓰기로 일관 통일
+                    else:
+                        if not current_dash_indent:
+                            if len(orig_indent) >= 4:
+                                current_dash_indent = "    "
+                            elif len(orig_indent) >= 2:
+                                current_dash_indent = "  "
+                            else:
+                                current_dash_indent = "- "
+                        if current_dash_indent == "- ":
+                            line = f"- {rest}  "
+                        else:
+                            line = f"{current_dash_indent}- {rest}  "
                 else:
                     if line.strip().startswith('#'):
                         current_bullet_level = 0
+                        current_dash_indent = ""
 
         cleaned_lines.append(line)
 
     text = '\n'.join(cleaned_lines)
+
+    # 본문 중간 각주 수거로 인해 발생할 수 있는 중복/고립 수평선(---) 정리
+    # 1) 연속된 수평선 정리
+    text = re.sub(r'(\n\s*[-*_]{3,}\s*){2,}', r'\n\n---', text)
+    # 2) 표 직전/직후의 고립된 수평선 정리 (표의 연속성 보장)
+    text = re.sub(r'(\|\s*\n)\s*[-*_]{3,}\s*\n+(\s*\|)', r'\1\2', text)
+    # 3) 3개 이상의 과도한 연속 빈 줄 정리
+    text = re.sub(r'\n{4,}', r'\n\n\n', text)
 
     # 3. 본문 인용부 치환 (예: 'Transformer1)' -> 'Transformer[^1]')
     if footnotes:
@@ -603,10 +882,10 @@ def clean_markdown_typography(markdown_text: str) -> str:
                 # 용어명 바로 뒤에 붙은 각주 번호 우선 치환 (예: Transformer1) -> Transformer[^1])
                 text = re.sub(rf'({re.escape(term)})\s*{num}\)', rf'\1[^{num}]', text)
             # 일반적인 문자 뒤의 각주 번호 치환 (예: 모달리티4) -> 모달리티[^4], 구조)3) -> 구조)[^3])
-            # 단, 연도 표현(예: 2023, 2024 등)의 숫자가 오인 치환되지 않도록 (?<!\d) 가드 적용
-            text = re.sub(rf'(?<!\d)([가-힣A-Za-z\)])\s*{num}\)', rf'\1[^{num}]', text)
+            # 단, 연도 표현(예: 2023, 2024 등)의 숫자나 대문자 약어(예: FP4, GPT4 등)가 오인 치환되지 않도록 가드 적용
+            text = re.sub(rf'(?<!\d)(?<![A-Z])([가-힣A-Za-z\)])\s*{num}\)', rf'\1[^{num}]', text)
 
-        # 4. 수집된 각주를 문서 최하단에 표준 GFM 각주 섹션으로 배치
+        # 4. 수집된 모든 각주를 문서 최하단에 단일 표준 GFM 각주 섹션으로 배치
         fn_section = "\n\n---\n\n### 📌 각주 (Footnotes)\n\n"
         for num in sorted(footnotes.keys()):
             term, desc = footnotes[num]
@@ -615,9 +894,203 @@ def clean_markdown_typography(markdown_text: str) -> str:
             else:
                 fn_section += f"[^{num}]: {desc}\n"
 
-        text = text.rstrip() + fn_section
+        # 본문 말미의 구분선 잔재 정리 후 각주 섹션 부착
+        text = text.rstrip()
+        if text.endswith('---'):
+            text = text[:-3].rstrip()
+
+        text = text + fn_section
 
     return text
+
+
+def resolve_citation_links(markdown_text: str, docs_dir: Optional[Path] = None) -> str:
+    """본문 내 인용된 위키문서 출처 표기(<출처: ...>) 중 링크가 누락되었거나 파손된 대상을
+    지식 DB(WikiDB/docs) 및 5번 데이터 출처 섹션을 바탕으로 자동 매핑하여
+    올바른 마크다운 링크 <출처: [문서제목](/api/documents/{doc_id})> 로 자동 복원(Auto-linkify)한다.
+    """
+    if not markdown_text:
+        return markdown_text
+
+    # 1. 문서 카탈로그 색인 구축
+    doc_catalog: dict[str, tuple[str, str]] = {}
+    doc_id_to_title: dict[str, str] = {}
+
+    def normalize_key(s: str) -> str:
+        return re.sub(r'[\s_()\[\]\-\.:]+', '', s).lower()
+
+    # 1-1. 5번 데이터 출처 섹션 우선 수집
+    sec5_match = re.search(r'##\s*5\.\s*데이터\s*출처.*?(?=\n##|\Z)', markdown_text, re.DOTALL)
+    if sec5_match:
+        sec5_text = sec5_match.group(0)
+        for line in sec5_text.splitlines():
+            link_match = re.search(r'\[(.*?)\]\((?:/api/documents/)?([^)]+)\)', line)
+            if link_match:
+                t = link_match.group(1).strip()
+                did = link_match.group(2).strip().replace('/api/documents/', '')
+                if did:
+                    doc_id_to_title[did] = t
+                    nk = normalize_key(t)
+                    if nk:
+                        doc_catalog[nk] = (did, t)
+                    ndid = normalize_key(did)
+                    if ndid:
+                        doc_catalog[ndid] = (did, t)
+
+    # 1-2. WikiDB/docs 디렉토리 색인 보강
+    if docs_dir is None:
+        docs_dir = Path(__file__).resolve().parent.parent / "WikiDB" / "docs"
+
+    if docs_dir.exists():
+        for md_path in docs_dir.glob("*.md"):
+            did = md_path.stem
+            if did.startswith("."):
+                continue
+            title = did
+            try:
+                head = md_path.read_text(encoding="utf-8", errors="replace")[:1200]
+                t_m = re.search(r'^#\s+(.+)$', head, re.MULTILINE)
+                if t_m:
+                    title = t_m.group(1).strip()
+                else:
+                    orig_f_m = re.search(r'\*\*원본\s*파일명\*\*:\s*`?([^`\n]+)`?', head)
+                    if orig_f_m:
+                        title = Path(orig_f_m.group(1).strip()).stem
+            except Exception:
+                title = did
+
+            if did not in doc_id_to_title:
+                doc_id_to_title[did] = title
+
+            nk = normalize_key(title)
+            if nk and nk not in doc_catalog:
+                doc_catalog[nk] = (did, title)
+
+            ndid = normalize_key(did)
+            if ndid and ndid not in doc_catalog:
+                doc_catalog[ndid] = (did, title)
+
+            clean_stem = re.sub(r'_\d+_[a-f0-9]+$', '', did)
+            n_clean = normalize_key(clean_stem)
+            if n_clean and n_clean not in doc_catalog:
+                doc_catalog[n_clean] = (did, title)
+
+    # 2. 단일 출처 항목 리졸브
+    def resolve_single_source(raw_item: str) -> Optional[tuple[str, str]]:
+        s = raw_item.strip()
+        if not s:
+            return None
+
+        # 2-1. 이미 올바른 마크다운 링크인 경우: [title](/api/documents/{doc_id})
+        already_link = re.match(r'^\[(.*)\]\((?:/api/documents/)?([^)]+)\)$', s)
+        if already_link:
+            title = already_link.group(1).strip()
+            did = already_link.group(2).strip().replace('/api/documents/', '')
+            return (title, did)
+
+        # 2-2. 텍스트 정제
+        cleaned = s.strip('<>[]()\'"').strip()
+        if not cleaned:
+            return None
+
+        # doc_id 정확 일치
+        if cleaned in doc_id_to_title:
+            return (doc_id_to_title[cleaned], cleaned)
+
+        # 정규화 키 일치
+        nk = normalize_key(cleaned)
+        if nk in doc_catalog:
+            did, title = doc_catalog[nk]
+            chosen_title = title if title and not title.endswith(('a0339d78', 'cfa62149', 'bb494629')) else cleaned
+            return (chosen_title, did)
+
+        # 부분 매칭 탐색
+        best_match = None
+        best_len = 0
+        for k, (did, t) in doc_catalog.items():
+            if len(k) >= 3 and (k in nk or nk in k):
+                common_len = min(len(k), len(nk))
+                if common_len > best_len:
+                    best_len = common_len
+                    best_match = (t, did)
+
+        if best_match and best_len >= 4:
+            return best_match
+
+        return (cleaned, "")
+
+    # 3. 본문 내 <출처: ...> 치환
+    def replace_citation_tag(match: re.Match) -> str:
+        body = match.group(1).strip()
+        if re.match(r'^\[.*?\]\(/api/documents/[^)]+\)$', body):
+            return f"<출처: {body}>"
+
+        parts = []
+        buf = []
+        in_bracket = 0
+        for char in body:
+            if char in ('[', '('):
+                in_bracket += 1
+                buf.append(char)
+            elif char in (']', ')'):
+                if in_bracket > 0:
+                    in_bracket -= 1
+                buf.append(char)
+            elif char == ',' and in_bracket == 0:
+                parts.append(''.join(buf).strip())
+                buf = []
+            else:
+                buf.append(char)
+        if buf:
+            parts.append(''.join(buf).strip())
+
+        resolved_items = []
+        for p in parts:
+            if not p:
+                continue
+            res = resolve_single_source(p)
+            if res:
+                t, did = res
+                if did:
+                    resolved_items.append(f"[{t}](/api/documents/{did})")
+                else:
+                    resolved_items.append(t)
+
+        if not resolved_items:
+            return match.group(0)
+
+        return ", ".join(f"<출처: {item}>" for item in resolved_items)
+
+    # 백틱으로 둘러싸인 출처 태그 및 링크의 백틱 벗기기
+    markdown_text = re.sub(r'`\s*(<출처\s*:[^>]+>)\s*`', r'\1', markdown_text)
+    markdown_text = re.sub(r'`\s*(\[[^\]\n]+\]\((?:/api/documents/)?[^)\n]+\))\s*`', r'\1', markdown_text)
+
+    resolved_md = re.sub(r'<출처\s*:\s*([^>]+)>', replace_citation_tag, markdown_text)
+
+    # 4. 이미지 캡션 내 출처 치환: *(... - 출처: ...)*
+    def replace_caption_source(match: re.Match) -> str:
+        full_caption = match.group(0)
+        prefix = match.group(1)
+        desc = match.group(2)
+        source_raw = match.group(3).strip()
+        suffix = match.group(4)
+
+        if '/api/documents/' in source_raw:
+            return full_caption
+
+        res = resolve_single_source(source_raw)
+        if res and res[1]:
+            t, did = res
+            return f"{prefix}{desc}[{t}](/api/documents/{did}){suffix}"
+        return full_caption
+
+    resolved_md = re.sub(
+        r'(\*\()([^\n*]*?출처\s*:\s*)([^\n*()]+)(\)\*)',
+        replace_caption_source,
+        resolved_md
+    )
+
+    return resolved_md
 
 
 def run_kordoc_lint(md_path: Path) -> tuple[bool, str]:
@@ -990,6 +1463,9 @@ def enrich_composite_overlay_images(
                     # 1. 크기 조건: 충분한 크기의 인포그래픽/도표 영역 (width >= 200, height >= 150)
                     if r.width < 200 or r.height < 150:
                         continue
+                    # 슬라이드 전체를 덮는 배경 캔버스(페이지 너비/높이의 85% 이상)는 레이아웃 배경이므로 제외
+                    if r.width >= page.rect.width * 0.85 and r.height >= page.rect.height * 0.85:
+                        continue
 
                     # 2. 텍스트 오버레이 조건: 해당 이미지 Rect와 겹치는 단어 수 조사
                     intersecting_words = [
@@ -1098,6 +1574,26 @@ def enrich_composite_overlay_images(
     # 연속된 불필요 빈 줄 정리
     updated_md = re.sub(r'\n{3,}', '\n\n', updated_md)
     return updated_md
+
+
+def get_gemini_api_keys_list() -> list[str]:
+    """환경변수에서 주 API 키와 대체(Fallback) 무료 키 목록을 순서대로 수집한다."""
+    keys: list[str] = []
+    for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY_FALLBACK", "GEMINI_API_KEYS"):
+        raw_val = os.getenv(env_var)
+        if raw_val:
+            for k in re.split(r"[,;]+", raw_val):
+                clean_k = k.strip().strip("'\"")
+                if clean_k and clean_k not in keys:
+                    keys.append(clean_k)
+    return keys
+
+
+def is_gemini_key_exhausted_or_invalid(error: Exception) -> bool:
+    """발생한 오류가 API 키 크레딧 소진(402), 인증 실패(401/403), 혹은 일시적 할당량 초과(429)인지 판별한다."""
+    err_str = str(error).upper()
+    return any(code in err_str for code in ("402", "RESOURCE_EXHAUSTED", "DEPLETED", "401", "403", "INVALID_ARGUMENT", "PERMISSION_DENIED"))
+
 
 
 

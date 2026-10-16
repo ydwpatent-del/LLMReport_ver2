@@ -202,7 +202,8 @@ class KordocWikiAgent:
         doc_id: str,
         original_filename: str,
         file_hash: str,
-        images_info: list[dict]
+        images_info: list[dict],
+        heartbeat_cb: Optional[object] = None
     ) -> Optional[str]:
         """Gemini 멀티모달 API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다."""
         if not self.api_key:
@@ -246,19 +247,19 @@ class KordocWikiAgent:
             chunks = self._split_into_smart_chunks(raw_md, max_chunk_size=8000)
             logger.info(f"총 {len(raw_md)}자, {len(chunks)}개 청크로 분할 처리")
 
-            # 단일 Chat Session을 생성하여 청크 간 문맥 및 연속성 유지
-            chat = client.chats.create(
-                model="gemini-2.5-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
-                    temperature=0.3,
-                    max_output_tokens=8192,  # 8,000자 청크 기준 최대 약 25,000자로 물리적 상한 강제 (무한 루프 방지)
-                )
+            # 청크별 독립 호출 설정 (이전 청크 히스토리 누적으로 인한 토큰 폭발 및 타임아웃 방지)
+            gen_config = types.GenerateContentConfig(
+                system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
+                temperature=0.3,
+                max_output_tokens=65536,  # Thinking 토큰 소모로 인한 본문 조기 절단 방지
             )
 
             processed_parts = []
             has_successful_chunk = False
             for idx, chunk in enumerate(chunks):
+                if callable(heartbeat_cb):
+                    heartbeat_cb()
+
                 is_first = (idx == 0)
                 part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
 
@@ -310,17 +311,29 @@ class KordocWikiAgent:
 
                 message_content = [types.Part.from_text(text=text_prompt)] + chunk_image_parts
 
-                response = chat.send_message(message_content)
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=message_content,
+                    config=gen_config,
+                )
 
-                # 비정상 초장문(무한 루프 환각) 감지 시 해당 청크만 원본 텍스트로 대체하여 나머지 결과 보존
-                if response and response.text and len(response.text) <= 30000:
-                    processed_parts.append(response.text.strip())
+
+                out_text = response.text.strip() if (response and response.text) else ""
+                # 조기 절단(Truncation) 감지: 열린 마크다운 링크로 끝나거나, 메타데이터/목차만 출력되고 본문이 증발한 경우
+                has_unclosed_link = bool(re.search(r'(?:\[[^\]]*|\]\([^\)]*)$', out_text))
+                has_meta_or_toc = ("**원본 파일명**" in out_text or "## 목차" in out_text)
+                is_truncated = has_unclosed_link or (
+                    has_meta_or_toc and len(chunk.strip()) >= 500 and len(out_text) < max(600, int(len(chunk.strip()) * 0.35))
+                )
+
+                # 비정상 초장문(무한 루프 환각) 또는 조기 절단 감지 시 해당 청크만 원본 텍스트로 대체하여 결과 보존
+                if out_text and len(out_text) <= 30000 and not is_truncated:
+                    processed_parts.append(out_text)
                     has_successful_chunk = True
-                    logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(response.text)}자 생성)")
+                    logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(out_text)}자 생성)")
                 else:
-                    out_len = len(response.text) if (response and response.text) else 0
                     logger.warning(
-                        f"청크 {idx+1} 비정상 출력 감지 (길이: {out_len}자) → "
+                        f"청크 {idx+1} 비정상/절단 출력 감지 (길이: {len(out_text)}자, 절단여부: {is_truncated}) → "
                         f"해당 청크만 원본 텍스트로 대체 (기존 {len(processed_parts)}개 청크 결과 보존)"
                     )
                     # 비정상 청크만 원본 텍스트로 대체하여 나머지 결과 보존
@@ -605,12 +618,13 @@ class KordocWikiAgent:
             )
 
             chat = client.chats.create(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
                     temperature=0.2,
                 )
             )
+
 
             response = chat.send_message([
                 types.Part.from_uri(file_uri=uploaded_file.uri, mime_type="application/pdf"),
@@ -657,6 +671,11 @@ class KordocWikiAgent:
             if filename in actual_set:
                 return f"![{alt}](/api/assets/{doc_id}/{filename})"
 
+            # 분할 파싱 문서에서 LLM이 'p4_image_035.png'의 'p4_' 접두사를 생략하고 'image_035.png'로 출력한 경우 원래 위치에서 매칭 복원
+            suffix_matches = [af for af in actual_files if af.endswith(f"_{filename}")]
+            if len(suffix_matches) == 1:
+                return f"![{alt}](/api/assets/{doc_id}/{suffix_matches[0]})"
+
             # 실존하지 않는 허구의 이미지 번호는 다른 파일로 오인 덮어쓰지 않고 안전하게 제거
             logger.warning(f"실존하지 않는 이미지 링크 감지 및 제거: {filename}")
             return ""
@@ -671,10 +690,10 @@ class KordocWikiAgent:
 
         # 목차(TOC) 영역 보호: 목차 블록 내부로는 이미지가 절대 재주입되지 않도록 본문 시작 위치 산출
         body_start_offset = 0
-        toc_match = re.search(r'(?:^|\n)##\s*목차\b', fixed_md)
+        toc_match = re.search(r'(?:^|\n)##\s*(?:📑\s*전체\s*)?목차\b', fixed_md)
         if toc_match:
             after_toc = fixed_md[toc_match.end():]
-            first_body_heading = re.search(r'\n##\s+(?!목차\b)[^\n]+', after_toc)
+            first_body_heading = re.search(r'\n#{1,3}\s+(?!목차\b)[^\n]+', after_toc)
             if first_body_heading:
                 body_start_offset = toc_match.end() + first_body_heading.start()
             else:
@@ -779,7 +798,8 @@ class KordocWikiAgent:
         file_hash: str,
         enable_ocr: bool = False,
         page_range: Optional[str] = None,
-        skip_lint: bool = False
+        skip_lint: bool = False,
+        heartbeat_cb: Optional[object] = None
     ) -> tuple[Path, list[Path], str]:
         """kordoc-wiki-ingest 전체 파이프라인(Phase 1 사전진단 -> Phase 2 파싱 -> Phase 3~5 정돈 -> Phase 6 린트)을 실행한다."""
         title = source_path.stem
@@ -813,6 +833,8 @@ class KordocWikiAgent:
 
                 merged_md_parts = []
                 for p_idx, p_range in enumerate(chunk_ranges):
+                    if callable(heartbeat_cb):
+                        heartbeat_cb()
                     with tempfile.TemporaryDirectory() as part_temp_dir:
                         part_out_md = Path(part_temp_dir) / f"part_{p_idx+1}.md"
                         cmd = f'cmd /c {kordoc_cmd} "{source_path.resolve()}" -p {p_range} -o "{part_out_md.resolve()}"'
@@ -824,27 +846,29 @@ class KordocWikiAgent:
 
                         if part_out_md.exists():
                             part_text = part_out_md.read_text(encoding="utf-8", errors="replace")
-                            # 이미지 네임스페이스 격리 (pX_image_XXX.png) 및 유효 이미지 선별
+                            # 이미지 네임스페이스 격리 (pX_image_XXX.png) 후 _extract_and_inline_images로 문맥과 함께 인라인 추출
                             part_img_dir = Path(part_temp_dir) / "images"
                             if part_img_dir.exists():
-                                for img_f in part_img_dir.glob("*.png"):
-                                    if not self._is_meaningful_image(img_f, has_caption=True):
-                                        # 비유효 노이즈 이미지는 태그 제거
-                                        part_text = part_text.replace(f"images/{img_f.name}", "")
-                                        part_text = part_text.replace(img_f.name, "")
-                                        continue
-
-                                    ns_name = f"p{p_idx+1}_{img_f.name}"
-                                    shutil.copy2(img_f, doc_asset_dir / ns_name)
-                                    extracted_images_info.append({"filename": ns_name, "path": doc_asset_dir / ns_name})
-                                    # 본문 이미지 태그 치환
-                                    part_text = part_text.replace(f"images/{img_f.name}", f"/api/assets/{doc_id}/{ns_name}")
-                                    part_text = part_text.replace(img_f.name, f"/api/assets/{doc_id}/{ns_name}")
-
-                            merged_md_parts.append(part_text)
+                                for img_f in list(part_img_dir.glob("*")):
+                                    if img_f.is_file() and img_f.suffix.lower() in IMAGE_EXTENSIONS:
+                                        ns_name = f"p{p_idx+1}_{img_f.name}"
+                                        ns_path = part_img_dir / ns_name
+                                        img_f.rename(ns_path)
+                                        part_text = re.sub(
+                                            rf'(?:images/)?{re.escape(img_f.name)}\b',
+                                            f"images/{ns_name}",
+                                            part_text
+                                        )
+                            part_adjusted, part_imgs_info = self._extract_and_inline_images(
+                                part_text, doc_id, doc_asset_dir, [part_img_dir, Path(part_temp_dir)]
+                            )
+                            extracted_images_info.extend(part_imgs_info)
+                            merged_md_parts.append(part_adjusted)
 
                 raw_md = "\n\n".join(merged_md_parts)
                 if ext == ".pdf":
+                    if callable(heartbeat_cb):
+                        heartbeat_cb()
                     raw_md = stitch_adjacent_pdf_images(source_path, raw_md, [doc_asset_dir])
                     raw_md = clean_pdf_decorative_images(source_path, raw_md, [doc_asset_dir])
                     raw_md = enrich_composite_overlay_images(source_path, raw_md, [doc_asset_dir])
@@ -896,7 +920,8 @@ class KordocWikiAgent:
             doc_id=doc_id,
             original_filename=source_path.name,
             file_hash=file_hash,
-            images_info=extracted_images_info
+            images_info=extracted_images_info,
+            heartbeat_cb=heartbeat_cb
         )
 
         if not final_md:

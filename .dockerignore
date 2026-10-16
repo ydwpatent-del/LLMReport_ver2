@@ -1,0 +1,14 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+Source/
+WikiDB/assets/
+WikiDB/docs/
+WikiDB/reports/
+WikiDB/manifest.json.corrupted_*
+.superpowers/
+.pytest_cache/
+tests/
+*.log
+desktop.ini

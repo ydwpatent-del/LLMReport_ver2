@@ -110,6 +110,15 @@ class BackupManager:
             logger.error(f"롤백 복구 실패 ({doc_file.name}): {e}")
         return False
 
+    def find_best_backup(self, doc_file: Path) -> Optional[Path]:
+        """특정 문서의 기존 백업 스냅샷 중 가장 본문 용량이 크고 온전한 완본 백업을 탐색한다."""
+        if not self.backup_dir.exists():
+            return None
+        candidates = list(self.backup_dir.glob(f"{doc_file.stem}_*.bak.md"))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: (p.stat().st_size, p.stat().st_mtime))
+
 
 # ============================================================================
 # 3. 품질 게이트 (QualityGate)
@@ -157,13 +166,16 @@ class AuditAgent:
         docs_dir: Optional[Path] = None,
         backup_dir: Optional[Path] = None,
         api_key: Optional[str] = None,
+        model_name: str = "gemini-3.8-flash",
     ):
+
         self.docs_dir = docs_dir or Path("WikiDB/docs")
         # backup_dir 기본값: docs_dir 기반 절대 경로로 결정하여 CWD 의존 제거
         resolved_docs = Path(self.docs_dir).resolve()
         default_backup = resolved_docs / ".backup"
         self.backup_mgr = BackupManager(backup_dir=backup_dir or default_backup)
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.model_name = model_name
 
     def audit_document(
         self,
@@ -183,6 +195,7 @@ class AuditAgent:
             return AuditReport(doc_id=doc_id, is_healthy=False, red_flags=["마크다운 파일이 존재하지 않음"])
 
         md_content = md_path.read_text(encoding="utf-8")
+        nospace_md_content = re.sub(r'[\s\W_]+', '', md_content)
 
         # 1. 마크다운 자체 Red Flag 검사
         current_red_flags = validate_red_flags(md_content)
@@ -228,13 +241,22 @@ class AuditAgent:
                         if len(words) < 3:
                             continue
 
-                        # 마크다운 본문에 해당 단어들이 존재하는지 검사
-                        missing_words_in_para = [w for w in words if w not in md_content]
+                        # 마크다운 본문에 해당 단어들이 존재하는지 검사 (공백 누락 텍스트 레이어 정규화 대응)
+                        def is_word_in_md(w: str) -> bool:
+                            if w in md_content:
+                                return True
+                            clean_w = re.sub(r'[\s\W_]+', '', w)
+                            return bool(clean_w and clean_w in nospace_md_content)
+
+                        missing_words_in_para = [w for w in words if not is_word_in_md(w)]
                         missing_ratio = len(missing_words_in_para) / len(words)
 
                         # 해당 단락의 단어 중 60% 이상이 마크다운에 전혀 없는 경우 누락으로 감지
                         if missing_ratio >= 0.6 and len(missing_words_in_para) >= 4:
-                            is_table_candidate = any(kw.lower() in para.lower() for kw in table_keywords) or (":" in para and len(para.split('\n')) >= 2)
+                            is_table_candidate = (
+                                any(kw.lower() in para.lower() for kw in table_keywords)
+                                or ((":" in para or "|" in para) and len(para.split('\n')) >= 2 and any(hdr in para for hdr in ["구분", "항목", "지표", "수치", "단위", "비중", "Upstream", "Downstream", "Category"]))
+                            )
                             first_line = para.split('\n')[0][:40]
 
                             if is_table_candidate:
@@ -361,7 +383,7 @@ class AuditAgent:
                             )
 
                             resp = client.models.generate_content(
-                                model="gemini-2.5-flash",
+                                model=self.model_name,
                                 contents=[
                                     types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
                                     prompt,
@@ -445,11 +467,47 @@ class AuditAgent:
         if report.is_healthy:
             return True, "문서가 이미 kordoc 규격에 완전히 부합하며 누락 및 결함이 없습니다.", report
 
-        # 결함 유형 및 심각도 분석 (Tier 2 치명적 결함 판정)
+        # 결함 유형 및 심각도 분석
         md_content = md_path.read_text(encoding="utf-8", errors="replace")
+
+        # 0. 현재 문서가 절단되었거나 단락 누락이 있을 때, 기존 완본 백업 스냅샷이 존재하면 우선 복원 및 서식 치유 시도
+        best_bak = self.backup_mgr.find_best_backup(md_path)
+        repaired_bak_content: Optional[str] = None
+        if best_bak and best_bak.exists() and best_bak.stat().st_size > len(md_content.encode("utf-8")) * 1.3:
+            bak_raw = best_bak.read_text(encoding="utf-8", errors="replace")
+            repaired_bak = generate_toc_and_anchors(clean_markdown_typography(bak_raw))
+            self.backup_mgr.create_backup(md_path)
+            md_path.write_text(repaired_bak, encoding="utf-8")
+            bak_report = self.audit_document(
+                doc_id=doc.id,
+                source_path=source_path,
+                md_path=md_path,
+                assets_dir=doc_asset_dir if doc_asset_dir.exists() else None,
+            )
+            if bak_report.is_healthy:
+                logger.info(f"✅ 완본 백업 스냅샷 복원 및 서식 치유 완료: {doc.title} ({best_bak.name})")
+                return True, f"완본 스냅샷 복원 및 표/서식 자율 치유 완료 ({best_bak.name})", bak_report
+            repaired_bak_content = repaired_bak
+            md_content = repaired_bak
+            report = bak_report
+
+        # 1. 본문 누락 없이 표/서식 결함만 존재하는 경우 Tier 1 로컬 무손실 치유 우선 시도
+        has_content_loss = (
+            len(report.missing_sections) > 0
+            or len(report.missing_tables) > 0
+            or (source_path.suffix.lower() == ".pdf" and report.inspected_pages >= 2 and len(md_content.strip()) < 1000)
+        )
+        if not has_content_loss:
+            fixed_try = generate_toc_and_anchors(clean_markdown_typography(md_content))
+            if len(validate_red_flags(fixed_try)) == 0:
+                self.backup_mgr.create_backup(md_path)
+                md_path.write_text(fixed_try, encoding="utf-8")
+                logger.info(f"✅ Tier 1 표/서식 무손실 정돈 완료: {doc.title}")
+                return True, f"Tier 1 표/서식 정돈 완료 ({len(report.red_flags)}개 서식 결함 보정)", report
+
         is_pdf_truncated = (
             source_path.suffix.lower() == ".pdf"
-            and report.inspected_pages >= 3
+            and report.inspected_pages >= 2
             and len(md_content.strip()) < 1000
         )
         is_fatal = (
@@ -468,7 +526,7 @@ class AuditAgent:
                     f"(누락단락: {len(report.missing_sections)}, 표누락: {len(report.missing_tables)}) "
                     f"→ Tier 2 최신 파이프라인 전면 재인제스트 가동"
                 )
-                self.backup_mgr.create_backup(md_path)
+                backup_before_ingest = self.backup_mgr.create_backup(md_path)
                 new_md_path, new_images, new_title = engine.execute_ingest(
                     source_path=source_path,
                     doc_id=doc.id,
@@ -477,6 +535,17 @@ class AuditAgent:
                 )
                 doc.target_md_path = str(new_md_path)
                 doc.title = new_title
+
+                # Tier 2 사후 무결성 검증: 재인제스트 결과물이 절단되었거나 기존 완본 백업보다 악화된 경우 즉시 롤백
+                new_content = new_md_path.read_text(encoding="utf-8", errors="replace") if new_md_path.exists() else ""
+                fallback_content = repaired_bak_content or backup_before_ingest.read_text(encoding="utf-8", errors="replace")
+                if len(new_content.strip()) < max(600, int(len(fallback_content.strip()) * 0.5)):
+                    logger.warning(
+                        f"⚠️ Tier 2 재인제스트 결과 조기 절단 감지 ({len(new_content)}자 < 백업 {len(fallback_content)}자) → 완본 백업 복구"
+                    )
+                    healed_fallback = generate_toc_and_anchors(clean_markdown_typography(fallback_content))
+                    new_md_path.write_text(healed_fallback, encoding="utf-8")
+
                 manifest_mgr.add_or_update_document(doc)
                 logger.info(f"✅ Tier 2 완본 재인제스트 완료: {doc.title}")
                 return True, f"Tier 2 완본 재인제스트 성공 (누락 {len(report.missing_sections)}개 섹션, {len(report.missing_tables)}개 표 복구)", report

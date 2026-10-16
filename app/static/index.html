@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e293b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/static/manifest.webmanifest">
   <title>LLM Wiki 지식 인제스트 대시보드</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -165,6 +169,14 @@
             </div>
 
             <div class="flex items-center gap-2 self-end sm:self-auto">
+              <button id="docHtmlBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 transition hidden items-center gap-1.5 cursor-pointer shadow-sm" title="독립 실행형 편집 가능 HTML 보고서 열기">
+                <i class="fa-brands fa-html5 text-emerald-400"></i>
+                <span class="hidden md:inline">HTML 열기</span>
+              </button>
+              <button id="docPdfBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 transition hidden items-center gap-1.5 cursor-pointer shadow-sm" title="A4 PDF 보고서 다운로드">
+                <i class="fa-solid fa-file-pdf text-rose-400"></i>
+                <span class="hidden md:inline">PDF 저장</span>
+              </button>
               <button id="auditDocBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95" title="문서 무결성 및 품질 검수">
                 <i class="fa-solid fa-shield-halved" id="auditIcon"></i>
                 <span class="hidden md:inline">품질 검수</span>
@@ -313,6 +325,14 @@
                 <button id="btnReviewReport" class="px-2.5 py-1.5 text-xs rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95" title="보고서 품질 검수">
                   <i class="fa-solid fa-clipboard-check" id="reviewIcon"></i>
                   <span id="btnReviewReportText">품질 검수</span>
+                </button>
+                <button id="btnOpenHtmlReport" class="px-2.5 py-1.5 text-xs rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm" title="독립 실행형 편집 가능 HTML 보고서 열기">
+                  <i class="fa-brands fa-html5 text-emerald-400"></i>
+                  <span>HTML 열기</span>
+                </button>
+                <button id="btnDownloadPdfReport" class="px-2.5 py-1.5 text-xs rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 transition flex items-center gap-1.5 cursor-pointer shadow-sm" title="A4 PDF 보고서 다운로드">
+                  <i class="fa-solid fa-file-pdf text-rose-400"></i>
+                  <span>PDF 저장</span>
                 </button>
                 <button id="copyGenMdBtn" class="px-2.5 py-1.5 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 transition flex items-center gap-1.5 cursor-pointer">
                   <i class="fa-regular fa-copy"></i>

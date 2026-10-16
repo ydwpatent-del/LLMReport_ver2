@@ -138,6 +138,15 @@ class ManifestManager:
                 return True
             return False
 
+    def touch_processing(self, doc_id: str) -> None:
+        """처리 중(processing)인 문서의 하트비트 시각(ingested_at)을 현재 시각으로 갱신하여 대형 문서 처리 중 타임아웃 오판을 방지한다."""
+        with self._lock:
+            self._data = self._load()
+            doc = self._data.documents.get(doc_id)
+            if doc and doc.status == "processing":
+                doc.ingested_at = datetime.now(timezone.utc).isoformat()
+                self._save()
+
     def cleanup_zombie_processing(self, timeout_seconds: int = 600) -> int:
         """지정된 시간 이상 'processing' 상태로 멈춰있는 고착(좀비) 문서를 'failed' 상태로 안전 전환한다."""
         with self._lock:
@@ -242,8 +251,17 @@ class ManifestManager:
                         extracted_hash = hash_match.group(1).strip() if hash_match else ""
                         extracted_title = title_match.group(1).strip() if title_match else md_file.stem
 
-                        # 이미 동일 해시의 정상 문서가 등록되어 있다면 중복 방지
+                        # 이미 동일 해시의 정상 문서가 등록되어 있다면 중복 방지 및 디스크 잔여 파일 정리
                         if extracted_hash and any(d.file_hash == extracted_hash and d.status == "completed" for d in self._data.documents.values()):
+                            try:
+                                md_file.unlink(missing_ok=True)
+                                orphan_asset = assets_dir / md_file.stem
+                                if orphan_asset.exists() and orphan_asset.is_dir():
+                                    import shutil
+                                    shutil.rmtree(orphan_asset, ignore_errors=True)
+                                logger.info(f"디스크 상의 동일 해시 중복 고아 파일 및 에셋 정리 완료: {md_file.name}")
+                            except Exception as del_err:
+                                logger.warning(f"중복 고아 파일 정리 실패 ({md_file.name}): {del_err}")
                             continue
 
                         orphan_id = md_file.stem
@@ -264,6 +282,20 @@ class ManifestManager:
                         new_registered_count += 1
                     except Exception:
                         pass
+
+            # 4. 실존하지 않는 타깃 경로를 가진 항목 중 동일 해시의 정상 항목이 이미 있는 경우 정리
+            for doc_id, doc in list(self._data.documents.items()):
+                if doc.status == "completed" and doc.file_hash:
+                    doc_path = Path(doc.target_md_path) if doc.target_md_path else None
+                    if not doc_path or not doc_path.exists():
+                        has_valid_peer = any(
+                            peer.id != doc_id and peer.file_hash == doc.file_hash and
+                            peer.target_md_path and Path(peer.target_md_path).exists()
+                            for peer in self._data.documents.values()
+                        )
+                        if has_valid_peer:
+                            del self._data.documents[doc_id]
+                            reconciled_count += 1
 
             if reconciled_count > 0 or new_registered_count > 0:
                 self._save()

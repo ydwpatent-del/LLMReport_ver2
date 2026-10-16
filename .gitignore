@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .superpowers/sdd/
+.env
+*.env
+gdrive_credentials*.json
+deploy_bundle.zip
+WikiDB/wiki_text_bundle.zip
+WikiDB/assets_map.json
+Source/
+WikiDB/
