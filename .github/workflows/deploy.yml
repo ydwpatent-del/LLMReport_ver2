@@ -68,17 +68,19 @@ jobs:
           WIKI_ACCESS_PIN: ${{ secrets.WIKI_ACCESS_PIN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON || secrets.GCP_SA_KEY }}
         run: |
           python3 -c "
           import os, json
           pin = os.environ.get('WIKI_ACCESS_PIN', '')
           folder = os.environ.get('GDRIVE_FOLDER_ID', '')
           api_key = os.environ.get('GEMINI_API_KEY', '')
+          creds_json = os.environ.get('GDRIVE_CREDENTIALS_JSON', '')
           with open('env.yaml', 'w', encoding='utf-8') as f:
               f.write('STORAGE_MODE: \"gdrive\"\n')
               f.write(f'WIKI_ACCESS_PIN: \"{pin}\"\n')
               f.write(f'GDRIVE_FOLDER_ID: \"{folder}\"\n')
-              f.write('GDRIVE_CREDENTIALS_PATH: \"gdrive_credentials.json\"\n')
+              f.write(f'GDRIVE_CREDENTIALS_JSON: {json.dumps(creds_json)}\n')
               f.write(f'GEMINI_API_KEY: {json.dumps(api_key)}\n')
           "
           gcloud run deploy ${{ env.SERVICE_NAME }} \
