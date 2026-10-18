@@ -52,13 +52,15 @@ class IngestAgent:
         manifest_mgr: ManifestManager,
         engine: Union[KordocWikiAgent, KordocEngine],
         supported_exts: set[str],
-        auto_sync_gdrive: bool = True
+        auto_sync_gdrive: bool = True,
+        storage: Optional[object] = None,
     ):
         self.source_dir = source_dir
         self.manifest_mgr = manifest_mgr
         self.engine = engine
         self.supported_exts = {ext.lower() for ext in supported_exts}
         self.auto_sync_gdrive = auto_sync_gdrive
+        self.storage = storage
         self.observer: Optional[Observer] = None
         # 동시 처리 방지를 위한 파일 경로 집합 및 락 (TOCTOU 방지)
         self._processing_files: set[Path] = set()
@@ -209,7 +211,10 @@ class IngestAgent:
         def _worker():
             try:
                 from app.gdrive_storage import get_gdrive_storage
-                storage = get_gdrive_storage()
+                from app.config import get_settings
+
+                settings = get_settings()
+                storage = self.storage or get_gdrive_storage()
                 wiki_db_dir = self.manifest_mgr.manifest_path.parent
 
                 # 1. 텍스트 번들(3.7MB) 자동 갱신
@@ -219,8 +224,11 @@ class IngestAgent:
                     f"({bundle_info['bundle_size_bytes'] / (1024 * 1024):.2f}MB, 문서 {bundle_info['docs_count']}건)"
                 )
 
-                # 2. 로컬 구글 드라이브 데스크톱 폴더가 설정된 경우 즉시 복사/동기화
-                if storage.has_mirror_dir:
+                # 실제 운영 WikiDB 경로와 일치하지 않는 임시 경로(테스트 등)인 경우 원격 Google Drive API 자동 푸시 원천 차단
+                is_prod_db = (wiki_db_dir.resolve() == settings.wiki_db_dir.resolve())
+
+                # 2. 로컬 구글 드라이브 데스크톱 폴더가 설정된 경우 즉시 복사/동기화 (운영 DB인 경우에만)
+                if storage.has_mirror_dir and is_prod_db:
                     sync_res = storage.sync_with_mirror_dir(
                         wiki_db_dir,
                         storage.settings.gdrive_local_mirror_dir,
@@ -228,13 +236,15 @@ class IngestAgent:
                     )
                     logger.info(f"✨ [자동 훅] Google Drive 데스크톱 폴더 자동 동기화 완료: {sync_res}")
 
-                # 3. Google Drive API가 설정되어 있고 활성화된 경우 원격 업로드 시도
-                elif storage.is_api_configured:
+                # 3. Google Drive API가 설정되어 있고 운영 DB인 경우에만 원격 업로드 시도
+                elif storage.is_api_configured and is_prod_db:
                     try:
                         push_res = storage.push_all_to_gdrive_api(wiki_db_dir=wiki_db_dir, upload_assets=True)
                         logger.info(f"✨ [자동 훅] Google Drive API 원격 동기화 완료: {push_res}")
                     except Exception as api_err:
                         logger.debug(f"원격 API 자동 푸시 스킵 또는 오류 (로컬 번들 유지): {api_err}")
+                elif not is_prod_db:
+                    logger.debug("비운영/테스트 WikiDB 경로이므로 원격 Google Drive API 동기화를 건너뜁니다.")
             except Exception as e:
                 logger.warning(f"인제스트 후 Google Drive 자동 동기화 훅 처리 중 오류 (인제스트는 정상 완료): {e}")
 

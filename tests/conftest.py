@@ -4,5 +4,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolate_test_environment(monkeypatch):
-    """테스트 실행 시 .env의 WIKI_ACCESS_PIN이 자동 활성화되어 401이 발생하는 것을 방지한다."""
+    """테스트 실행 시 실제 인증 및 외부 Google Drive 연동이 호출되지 않도록 완벽히 격리한다."""
     monkeypatch.delenv("WIKI_ACCESS_PIN", raising=False)
+    monkeypatch.delenv("GDRIVE_FOLDER_ID", raising=False)
+    monkeypatch.delenv("GDRIVE_CREDENTIALS_JSON", raising=False)
+    monkeypatch.setenv("STORAGE_MODE", "local")

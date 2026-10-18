@@ -167,13 +167,20 @@ def test_ingest_agent_auto_sync_hook(tmp_path: Path):
     assets_dir.mkdir(parents=True)
 
     manifest_mgr = ManifestManager(manifest_path)
+    from app.config import Settings
+    from app.gdrive_storage import GDriveStorageManager
+
+    test_settings = Settings(storage_mode="local", gdrive_folder_id=None, gdrive_credentials_json=None)
+    test_storage = GDriveStorageManager(settings=test_settings)
     engine = KordocEngine(docs_dir, assets_dir)
+
     agent = IngestAgent(
         source_dir=source_dir,
         manifest_mgr=manifest_mgr,
         engine=engine,
         supported_exts={".txt", ".md"},
         auto_sync_gdrive=True,
+        storage=test_storage,
     )
 
     doc_file = source_dir / "auto_sync_test.md"

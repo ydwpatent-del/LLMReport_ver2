@@ -344,9 +344,14 @@ class GDriveStorageManager:
                 if bundle_file_id:
                     bundle_bytes = self._download_file_bytes(service, bundle_file_id)
                     if bundle_bytes:
-                        local_bundle.write_bytes(bundle_bytes)
-                        ext_res = self.extract_text_bundle(local_bundle, target_db)
-                        result.update({"bootstrapped": True, "source": "gdrive_api", **ext_res})
+                        if zipfile.is_zipfile(io.BytesIO(bundle_bytes)):
+                            temp_download = local_bundle.with_suffix(".zip.download")
+                            temp_download.write_bytes(bundle_bytes)
+                            ext_res = self.extract_text_bundle(temp_download, target_db)
+                            temp_download.replace(local_bundle)
+                            result.update({"bootstrapped": True, "source": "gdrive_api", **ext_res})
+                        else:
+                            logger.warning("⚠️ Google Drive에서 다운로드한 번들이 유효한 ZIP 파일이 아닙니다.")
 
                 # Google Drive 내 reports 하위 폴더에서 추가/최신 보고서 동기화
                 reports_folder_id = self._find_remote_file_id(
@@ -790,21 +795,30 @@ class GDriveStorageManager:
         parent_id: str,
         mime_type: str = "application/octet-stream",
     ) -> Optional[str]:
-        existing_id = self._find_remote_file_id(service, name=local_path.name, parent_id=parent_id)
+        size = local_path.stat().st_size if local_path.exists() else 0
+        use_resumable = size > 1024 * 512
         try:
             from googleapiclient.http import MediaFileUpload
 
-            media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
+            media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=use_resumable, chunksize=1024 * 1024)
         except Exception:
             media = None
 
+        existing_id = self._find_remote_file_id(service, name=local_path.name, parent_id=parent_id)
         if existing_id:
-            updated = service.files().update(fileId=existing_id, media_body=media, fields="id").execute()
-            return updated.get("id", existing_id)
+            req = service.files().update(fileId=existing_id, media_body=media, fields="id")
         else:
             metadata = {"name": local_path.name, "parents": [parent_id]}
-            created = service.files().create(body=metadata, media_body=media, fields="id").execute()
-            return created.get("id")
+            req = service.files().create(body=metadata, media_body=media, fields="id")
+
+        if use_resumable and media is not None:
+            response = None
+            while response is None:
+                _, response = req.next_chunk()
+            return response.get("id", existing_id)
+        else:
+            res = req.execute()
+            return res.get("id", existing_id)
 
 
 _gdrive_instance: Optional[GDriveStorageManager] = None
