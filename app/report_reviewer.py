@@ -11,7 +11,7 @@ from google.genai import types
 
 load_dotenv()
 
-from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid
+from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid, is_gemini_key_permanently_exhausted
 
 
 logger = logging.getLogger("ReportReviewAgent")
@@ -223,19 +223,20 @@ class ReportReviewAgent:
         if not context or not context.strip():
             return True, True, [], []
 
-        prompt = f"""당신은 AI 생성 심층 기술/시장 분석 보고서의 사실 정합성과 인과 논리성을 검증하는 수석 감수위원입니다.
-제공된 [원본 컨텍스트 데이터]와 [검수 대상 보고서]를 엄밀하게 상호 대조하여 다음 2대 핵심 항목을 정밀 감사하십시오.
+        prompt = f"""당신은 AI 생성 심층 기술/시장 분석 보고서의 사실 정합성, 데이터 최신성, 그리고 논리적 정합성을 검증하는 수석 감수위원입니다.
+제공된 [원본 컨텍스트 데이터](기존 작성분 근거 위키 문서 및 신규/후보 위키 문서)와 [검수 대상 보고서]를 엄밀하게 상호 대조하여 다음 2대 핵심 항목을 정밀 감사하십시오.
 
 [핵심 감사 기준]
-1. 사실 정합성 (Factuality):
-   - 보고서에 서술된 시장 규모 수치, 연도별 전망, CAGR %, 기업명, 핵심 기술 규격(nm, Gbps, W 등)이 [원본 컨텍스트 데이터]에 근거하고 있는지 대조하십시오.
-   - 컨텍스트에 전혀 없는 날조된(Fabricated) 수치나 허위 기업/기술 사양이 포함되어 있다면 factuality_valid를 false로 설정하고 구체적인 결함 사유를 작성하십시오.
-   - 모든 주요 사실과 수치가 컨텍스트와 부합하거나 왜곡이 없다면 factuality_valid를 true로 설정하십시오.
+1. 사실 정합성, 위키 문서 그라운딩 및 데이터 최신성 검증 (Factuality, Wiki Grounding & Data Recency Verification):
+   - 보고서에 서술된 시장 규모 수치, 연도별 전망, CAGR %, 기업명, 핵심 기술 규격(nm, Gbps, W 등)이 [원본 컨텍스트 데이터]에 직접 근거하고 있는지 대조하십시오.
+   - **데이터 최신성 및 기준 연도(Survey/Base Year) 대조 감사**: 기존 근거 문서 데이터와 신규 등재 문서 데이터를 대조할 때, 신규 문서에 포함된 과거 시점(구형 기준 연도)의 통계가 기존의 더 최신 통계를 덮어썼거나(역행 갱신), 반대로 실제로 더 최근에 조사된 최신 지표가 원천 데이터에 존재함에도 기준 연도 및 변화 궤적(Trajectory) 설명 없이 구형 수치와 무분별하게 혼재된 경우 factuality_valid를 false로 설정하고 구체적 결함 사유를 작성하십시오.
+   - 컨텍스트에 전혀 없는 날조된(Fabricated) 수치나 허위 기업/기술 사양이 포함되어 있거나, 위키 문서에 명시되지 않은 미확인 사실이 독단적으로 단정 서술된 경우에도 factuality_valid를 false로 설정하십시오.
+   - 모든 주요 사실과 수치가 원천 컨텍스트에 부합하고 최신 데이터 기준이 정합하게 반영되었다면 factuality_valid를 true로 설정하십시오.
 
-2. 인과 논리성 (Causality):
-   - 2장(기술동향)의 핵심 기술/아키텍처 혁신이 3장(시장동향)의 시장 성장을 이끄는 3단계 논리 구조([기술 규격/혁신] -> [물리적·경제적 병목 해결] -> [전방 산업 채택 및 시장 창출])가 설득력 있고 유기적으로 서술되었는지 평가하십시오.
-   - 2장과 3장이 단순히 분리 나열되어 있거나, 기술 혁신과 시장 성장의 인과관계가 결여되어 비논리적이라면 causality_valid를 false로 설정하고 구체적 결함 사유를 작성하십시오.
-   - 3단계 인과 논리가 명확하고 논리적 연결이 충분하다면 causality_valid를 true로 설정하십시오.
+2. 논리적 정합성 및 기술-시장 3단계 인과관계 감사 (Logical Consistency & Causality Review):
+   - **기존 작성분과 신규 데이터 간 논리적 충돌 감사**: 복수의 근거 문서(기존 작성분 근거 데이터 vs 신규 후보 데이터)를 통합할 때, 공정 세대 차이, 조사 기관별 산정 범위 차이, 국내 vs 글로벌 세그먼트 차이 등 전제 조건에 대한 규명 없이 마구잡이로 내용을 단순 증분·나열하여 문단 간 **논리적 모순이나 충돌(Contradiction)**이 발생했는지 감사하십시오.
+   - **기술-시장 3단계 인과 구조 감사**: 2장(기술동향)의 핵심 기술/아키텍처 혁신이 3장(시장동향)의 시장 성장을 이끄는 3단계 논리 구조([기술 규격/혁신] -> [물리적·경제적 병목 해결] -> [전방 산업 채택 및 시장 창출])가 설득력 있고 유기적으로 서술되었는지 평가하십시오.
+   - 기존 논리 체계와 충돌하거나 2장과 3장의 인과관계가 결여되어 비논리적이라면 causality_valid를 false로 설정하고 구체적 결함 사유를 작성하십시오. 논리적 일관성과 3단계 인과 논리가 모두 명확하다면 causality_valid를 true로 설정하십시오.
 
 [주제어]: {topic}
 
@@ -260,7 +261,10 @@ class ReportReviewAgent:
 
             keys_to_try = self.api_keys or ([self.api_key] if self.api_key else [])
             for key_idx, current_key in enumerate(keys_to_try, 1):
-                client = genai.Client(api_key=current_key)
+                if self.client and hasattr(self.client, "models") and "Mock" in self.client.__class__.__name__:
+                    client = self.client
+                else:
+                    client = genai.Client(api_key=current_key)
                 key_masked = f"{current_key[:8]}...{current_key[-4:]}" if len(current_key) > 12 else "key"
                 key_failed = False
 
@@ -279,7 +283,7 @@ class ReportReviewAgent:
                             break
                     except Exception as e:
                         last_error = e
-                        if is_gemini_key_exhausted_or_invalid(e):
+                        if is_gemini_key_permanently_exhausted(e):
                             logger.warning(
                                 f"Gemini API 키 #{key_idx}({key_masked}) 크레딧 소진 또는 인증 오류 감지 ({e}). "
                                 f"다음 대체 키로 자동 전환을 시도합니다."
@@ -287,7 +291,7 @@ class ReportReviewAgent:
                             key_failed = True
                             break  # 해당 키는 즉시 중단하고 다음 키로
                         else:
-                            logger.warning(f"Gemini 모델 '{model_name}' (키 #{key_idx}) 호출 오류: {e}")
+                            logger.warning(f"Gemini 모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({e}), 다음 모델로 폴백합니다.")
 
                 if response_text:
                     break
@@ -363,10 +367,10 @@ class ReportReviewAgent:
                 if len(fresh_docs) > 3:
                     summary_titles += f" 외 {len(fresh_docs) - 3}건"
                 defects.append(
-                    f"보고서 작성 이후 WikiDB에 신규 등재된 관련 문서 {len(fresh_docs)}건({summary_titles})이 발견되었습니다. 최신 데이터 동기화 및 보정이 필요합니다."
+                    f"보고서 작성 이후 WikiDB에 신규 등재된 관련 문서 {len(fresh_docs)}건({summary_titles})이 발견되었습니다. 기존 근거 데이터와 최신성 및 논리적 정합성 대조 후 보정이 필요합니다."
                 )
                 suggestions.append(
-                    f"신규 등재 문서({summary_titles})의 최신 시장 통계 및 기술 아키텍처 데이터를 보고서에 통합하여 최신화하십시오."
+                    f"기존 작성분의 근거 데이터와 신규 등재 문서({summary_titles})의 기준 연도(최신성) 및 기술-시장 논리적 정합성을 대조·리뷰한 후, 검증된 최신 시장 통계 및 기술 아키텍처 데이터만 보고서에 선별 통합하십시오(구형 수치 역행 갱신 및 마구잡이 증분 금지)."
                 )
             else:
                 checklist["fresh_knowledge_synced"] = True

@@ -33,7 +33,7 @@ jobs:
 
       - name: Run Core Tests
         run: |
-          pytest tests/test_server.py tests/test_gdrive_storage.py tests/test_ingest_agent.py -v
+          pytest tests/test_server.py tests/test_gdrive_storage.py tests/test_ingest_agent.py tests/test_api_key_fallback.py -v
 
   deploy:
     name: Deploy to Cloud Run
@@ -68,6 +68,7 @@ jobs:
           WIKI_ACCESS_PIN: ${{ secrets.WIKI_ACCESS_PIN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_FALLBACK: ${{ secrets.GEMINI_API_KEY_FALLBACK }}
           GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON || secrets.GCP_SA_KEY }}
         run: |
           python3 -c "
@@ -75,6 +76,7 @@ jobs:
           pin = os.environ.get('WIKI_ACCESS_PIN', '')
           folder = os.environ.get('GDRIVE_FOLDER_ID', '')
           api_key = os.environ.get('GEMINI_API_KEY', '')
+          api_key_fb = os.environ.get('GEMINI_API_KEY_FALLBACK', '')
           creds_json = os.environ.get('GDRIVE_CREDENTIALS_JSON', '')
           with open('env.yaml', 'w', encoding='utf-8') as f:
               f.write('STORAGE_MODE: \"gdrive\"\n')
@@ -82,6 +84,8 @@ jobs:
               f.write(f'GDRIVE_FOLDER_ID: \"{folder}\"\n')
               f.write(f'GDRIVE_CREDENTIALS_JSON: {json.dumps(creds_json)}\n')
               f.write(f'GEMINI_API_KEY: {json.dumps(api_key)}\n')
+              if api_key_fb:
+                  f.write(f'GEMINI_API_KEY_FALLBACK: {json.dumps(api_key_fb)}\n')
           "
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --source . \

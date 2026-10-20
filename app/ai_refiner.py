@@ -7,15 +7,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.utils import generate_standard_metadata_header, generate_toc_and_anchors, KNOWN_PUBLISHERS
+from app.utils import generate_standard_metadata_header, generate_toc_and_anchors, KNOWN_PUBLISHERS, get_gemini_api_keys_list
 
 logger = logging.getLogger("AIRefiner")
 
 class AIRefiner:
     """kordoc 1차 파싱 결과를 LLM Wiki Ground Truth 고품질 완본으로 승화시키는 정돈 엔진."""
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    def __init__(self, api_key: Optional[str] = None, api_keys: Optional[list[str]] = None):
+        if api_keys:
+            self.api_keys = api_keys
+        elif api_key:
+            self.api_keys = [api_key]
+        else:
+            self.api_keys = get_gemini_api_keys_list()
+        self.api_key = self.api_keys[0] if self.api_keys else None
         if not self.api_key:
             logger.warning("GEMINI_API_KEY 환경변수가 설정되지 않았습니다. LLM 기반 정돈 기능이 비활성화됩니다.")
 

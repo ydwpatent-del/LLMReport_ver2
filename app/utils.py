@@ -1589,10 +1589,24 @@ def get_gemini_api_keys_list() -> list[str]:
     return keys
 
 
-def is_gemini_key_exhausted_or_invalid(error: Exception) -> bool:
-    """발생한 오류가 API 키 크레딧 소진(402), 인증 실패(401/403), 혹은 일시적 할당량 초과(429)인지 판별한다."""
+def is_gemini_key_permanently_exhausted(error: Exception) -> bool:
+    """API 키 자체의 크레딧 고갈(402), 만료 또는 인증 실패(401/403)인지 판별한다 (다음 키로 넘어가야 함)."""
     err_str = str(error).upper()
-    return any(code in err_str for code in ("402", "RESOURCE_EXHAUSTED", "DEPLETED", "401", "403", "INVALID_ARGUMENT", "PERMISSION_DENIED"))
+    return any(code in err_str for code in ("402", "DEPLETED", "PREPAYMENT", "401", "403", "PERMISSION_DENIED", "API_KEY_INVALID"))
+
+
+def is_gemini_rate_limited(error: Exception) -> bool:
+    """특정 모델의 일시적 요청량 또는 분당/일일 할당량 초과(429)인지 판별한다 (다음 모델로 넘어가야 함)."""
+    err_str = str(error).upper()
+    # 402 선불 크레딧 소진은 키 영구 소진이므로 단순 rate limit에서 제외
+    if any(code in err_str for code in ("402", "DEPLETED", "PREPAYMENT")):
+        return False
+    return any(code in err_str for code in ("429", "RESOURCE_EXHAUSTED", "RATE_LIMIT", "QUOTA"))
+
+
+def is_gemini_key_exhausted_or_invalid(error: Exception) -> bool:
+    """발생한 오류가 API 키 크레딧 소진(402), 인증 실패(401/403), 혹은 일시적 할당량 초과(429)인지 종합 판별한다."""
+    return is_gemini_key_permanently_exhausted(error) or is_gemini_rate_limited(error)
 
 
 

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from app.utils import get_gemini_api_keys_list
+
 logger = logging.getLogger("TopicSearch")
 
 # 지원 임베딩 모델 목록 (우선순위 순서)
@@ -92,9 +94,10 @@ def get_cache_manager(cache_file: Path) -> EmbeddingCacheManager:
 def get_embedding(
     text: str,
     client: Optional[object],
-    cache: Optional[EmbeddingCacheManager] = None
+    cache: Optional[EmbeddingCacheManager] = None,
+    fallback_clients: Optional[list[object]] = None
 ) -> Optional[list[float]]:
-    """텍스트의 임베딩 벡터를 캐시 또는 Gemini API로부터 추출한다."""
+    """텍스트의 임베딩 벡터를 캐시 또는 Gemini API(다중 클라이언트 폴백 지원)로부터 추출한다."""
     clean_text = text.strip()
     if not clean_text:
         return None
@@ -105,28 +108,37 @@ def get_embedding(
         if cached_vec:
             return cached_vec
 
-    # 2. API 호출
-    if client is None:
+    # 2. 호출 대상 클라이언트 목록 구성
+    all_clients = []
+    if client:
+        all_clients.append(client)
+    if fallback_clients:
+        for fb in fallback_clients:
+            if fb not in all_clients:
+                all_clients.append(fb)
+
+    if not all_clients:
         return None
 
     # 너무 긴 텍스트는 앞 4,000자로 축약
     truncated_text = clean_text[:4000]
 
-    for model_name in EMBEDDING_MODELS:
-        try:
-            response = client.models.embed_content(
-                model=model_name,
-                contents=truncated_text
-            )
-            if response and response.embeddings and len(response.embeddings) > 0:
-                values = response.embeddings[0].values
-                if values:
-                    if cache:
-                        cache.set(clean_text, values)
-                    return values
-        except Exception as e:
-            logger.debug(f"임베딩 모델 '{model_name}' 호출 오류: {e}")
-            continue
+    for cli in all_clients:
+        for model_name in EMBEDDING_MODELS:
+            try:
+                response = cli.models.embed_content(
+                    model=model_name,
+                    contents=truncated_text
+                )
+                if response and response.embeddings and len(response.embeddings) > 0:
+                    values = response.embeddings[0].values
+                    if values:
+                        if cache:
+                            cache.set(clean_text, values)
+                        return values
+            except Exception as e:
+                logger.debug(f"임베딩 모델 '{model_name}' 호출 오류: {e}")
+                continue
 
     return None
 
@@ -282,21 +294,25 @@ def search_relevant_sections(topic: str, docs_dir: Path, top_k: int = 5) -> list
     if not keywords:
         keywords = [topic_clean.lower()]
 
-    # 0단계: 임베딩 캐시 및 클라이언트 준비
+    # 0단계: 임베딩 캐시 및 다중 클라이언트 준비
     cache_file = (docs_dir.parent if docs_dir.name == "docs" else docs_dir) / ".embedding_cache.json"
     cache = get_cache_manager(cache_file)
 
-    client = None
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if api_key:
+    clients = []
+    keys = get_gemini_api_keys_list()
+    if keys:
         try:
             from google import genai
-            client = genai.Client(api_key=api_key)
+            for k in keys:
+                clients.append(genai.Client(api_key=k))
         except Exception as e:
-            logger.debug(f"Gemini 클라이언트 초기화 실패 (룰베이스 단독 모드 가동): {e}")
+            logger.debug(f"Gemini 클라이언트 초기화 오류: {e}")
 
-    # 쿼리 임베딩 추출 (실패 시 None)
-    query_vector = get_embedding(topic_clean, client, cache) if client else None
+    client = clients[0] if clients else None
+    fallback_clients = clients[1:] if len(clients) > 1 else []
+
+    # 쿼리 임베딩 추출 (실패 시 None, 다중 클라이언트 자동 폴백)
+    query_vector = get_embedding(topic_clean, client, cache, fallback_clients=fallback_clients) if clients else None
 
     candidate_docs = []
     seen_dedup_keys: dict[str, dict] = {}
@@ -417,7 +433,7 @@ def search_relevant_sections(topic: str, docs_dir: Path, top_k: int = 5) -> list
             # 섹션 단위 시맨틱 임베딩 유사도 반영
             if query_vector:
                 sec_repr = f"{sec.heading}\n{sec.text[:800]}"
-                sec_emb = get_embedding(sec_repr, client, cache)
+                sec_emb = get_embedding(sec_repr, client, cache, fallback_clients=fallback_clients)
                 if sec_emb:
                     sec_sim = cosine_similarity(query_vector, sec_emb)
                     if sec_sim > 0.55:

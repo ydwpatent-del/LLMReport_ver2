@@ -16,6 +16,9 @@ from app.utils import (
     run_kordoc_lint,
     validate_red_flags,
     clean_markdown_typography,
+    get_gemini_api_keys_list,
+    is_gemini_key_exhausted_or_invalid,
+    is_gemini_key_permanently_exhausted,
 )
 
 logger = logging.getLogger("AuditAgent")
@@ -166,6 +169,7 @@ class AuditAgent:
         docs_dir: Optional[Path] = None,
         backup_dir: Optional[Path] = None,
         api_key: Optional[str] = None,
+        api_keys: Optional[list[str]] = None,
         model_name: str = "gemini-3.8-flash",
     ):
 
@@ -174,7 +178,13 @@ class AuditAgent:
         resolved_docs = Path(self.docs_dir).resolve()
         default_backup = resolved_docs / ".backup"
         self.backup_mgr = BackupManager(backup_dir=backup_dir or default_backup)
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if api_keys:
+            self.api_keys = api_keys
+        elif api_key:
+            self.api_keys = [api_key]
+        else:
+            self.api_keys = get_gemini_api_keys_list()
+        self.api_key = self.api_keys[0] if self.api_keys else None
         self.model_name = model_name
 
     def audit_document(
@@ -354,12 +364,12 @@ class AuditAgent:
         updated_md = current_md
 
         # 2. AI 멀티모달 외과적 보정 실행
-        if self.api_key and source_path.exists() and source_path.suffix.lower() == ".pdf":
+        keys_to_try = self.api_keys or ([self.api_key] if self.api_key else get_gemini_api_keys_list())
+        if keys_to_try and source_path.exists() and source_path.suffix.lower() == ".pdf":
             try:
                 from google import genai
                 from google.genai import types
 
-                client = genai.Client(api_key=self.api_key)
                 doc = pymupdf.open(str(source_path))
 
                 for issue in report.issues:
@@ -382,14 +392,40 @@ class AuditAgent:
                                 f"**누락된 본문/표/수식 마크다운 조각만을 완전하게 작성**하여 출력하십시오. (인사말/사족 절대 금지)"
                             )
 
-                            resp = client.models.generate_content(
-                                model=self.model_name,
-                                contents=[
-                                    types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-                                    prompt,
-                                ],
-                                config=types.GenerateContentConfig(temperature=0.1),
-                            )
+                            resp = None
+                            candidate_models = [self.model_name]
+                            for m_alt in ["gemini-3.5-flash", "gemini-flash-latest"]:
+                                if m_alt not in candidate_models:
+                                    candidate_models.append(m_alt)
+
+                            for current_key in keys_to_try:
+                                key_failed = False
+                                for model_to_use in candidate_models:
+                                    try:
+                                        client = genai.Client(api_key=current_key)
+                                        resp = client.models.generate_content(
+                                            model=model_to_use,
+                                            contents=[
+                                                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                                                prompt,
+                                            ],
+                                            config=types.GenerateContentConfig(temperature=0.1),
+                                        )
+                                        if resp and resp.text:
+                                            break
+                                    except Exception as gen_e:
+                                        if is_gemini_key_permanently_exhausted(gen_e):
+                                            logger.warning(f"AuditAgent 키 크레딧 소진/인증 오류 감지 ({gen_e}). 대체 키로 전환합니다.")
+                                            key_failed = True
+                                            break
+                                        logger.warning(f"AuditAgent 모델 '{model_to_use}' 호출 실패 ({gen_e}), 다음 모델로 폴백합니다.")
+                                if resp and resp.text:
+                                    break
+                                if key_failed:
+                                    continue
+
+                            if not resp or not resp.text:
+                                continue
 
                             patch_text = resp.text.strip()
                             patch_text = re.sub(r'^```(?:markdown)?\r?\n', '', patch_text)

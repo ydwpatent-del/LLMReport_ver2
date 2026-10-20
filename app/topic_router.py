@@ -22,6 +22,8 @@ topic_router = APIRouter(prefix="/api/topic", tags=["Topic Reports"])
 class TopicGenerateRequest(BaseModel):
     """보고서 생성 요청 DTO."""
     topic: str
+    update_if_exists: bool = True
+    force: bool = False
 
 class TopicRefineRequest(BaseModel):
     """보고서 보정 요청 DTO."""
@@ -84,7 +86,12 @@ def generate_topic_report(
         raise HTTPException(status_code=400, detail="주제어를 1글자 이상 입력해 주십시오.")
 
     try:
-        result = generator.generate_report(topic=topic, docs_dir=settings.docs_dir)
+        result = generator.generate_report(
+            topic=topic,
+            docs_dir=settings.docs_dir,
+            update_if_exists=req.update_if_exists,
+            force=req.force,
+        )
         return result
     except ValueError as e:
         # API 키 누락 등 설정 오류
@@ -113,7 +120,12 @@ def generate_topic_report_async(
 
     def _worker():
         task_manager.update_task(task_id, 20, f"'{topic}' 관련 지식 및 시각 도표 탐색 중...")
-        result = generator.generate_report(topic=topic, docs_dir=docs_dir)
+        result = generator.generate_report(
+            topic=topic,
+            docs_dir=docs_dir,
+            update_if_exists=req.update_if_exists,
+            force=req.force,
+        )
         task_manager.update_task(task_id, 95, "보고서 무결성 치유 및 최종 저장 완료...")
         return result
 
@@ -230,12 +242,14 @@ def review_topic_report_endpoint(
         except Exception as e:
             logger.warning(f"검수 중 신규 지식 탐색 오류: {e}")
 
-    # 탐색된 관련 문서로부터 컨텍스트 문자열 및 유효 이미지 화이트리스트 추출
+    # 탐색된 관련 문서로부터 기존 근거 데이터 / 신규 후보 데이터를 구분한 컨텍스트 및 유효 이미지 화이트리스트 추출
     context_blocks = []
     valid_image_urls = []
+    fresh_doc_ids = {d["doc_id"] for d in fresh_docs}
     for doc in latest_matched:
         doc_title = doc.get("title", doc.get("doc_id", "참고 문서"))
         doc_id = doc.get("doc_id", "")
+        role_label = "신규/미반영 후보 문서" if doc_id in fresh_doc_ids else "기존 작성분 근거 문서"
         sec_texts = []
         for sec in doc.get("sections", []):
             heading = getattr(sec, "heading", "") if not isinstance(sec, dict) else sec.get("heading", "")
@@ -254,9 +268,9 @@ def review_topic_report_endpoint(
                         valid_image_urls.append(url)
 
         if sec_texts:
-            context_blocks.append(f"## [문서] {doc_title} (ID: {doc_id})\n" + "\n\n".join(sec_texts))
+            context_blocks.append(f"## [{role_label}] {doc_title} (ID: {doc_id})\n" + "\n\n".join(sec_texts))
         elif doc.get("content"):
-            context_blocks.append(f"## [문서] {doc_title} (ID: {doc_id})\n" + str(doc.get("content"))[:2000])
+            context_blocks.append(f"## [{role_label}] {doc_title} (ID: {doc_id})\n" + str(doc.get("content"))[:2000])
 
     context_str = "\n\n---\n\n".join(context_blocks).strip()
 
@@ -348,6 +362,58 @@ def refine_topic_report_async_endpoint(
 
     task_manager.submit_task(task_id, _worker)
     return AsyncTaskResponse(task_id=task_id, message="보고서 자율 반추 보정이 비동기 작업으로 시작되었습니다.")
+
+@topic_router.post("/reports/{report_id}/update-wiki", response_model=dict)
+def update_report_with_wiki_endpoint(
+    report_id: str,
+    force_all_matched: bool = False,
+    settings: Settings = Depends(get_settings),
+    generator: TopicReportGenerator = Depends(get_generator),
+):
+    """지정된 보고서에 대해 WikiDB의 최신 위키 문서를 탐색하여 안전한 증분 개정(Incremental Update)을 수행한다."""
+    existing = generator.get_report_detail(report_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
+
+    try:
+        result = generator.update_report_with_wiki_docs(
+            report_id=report_id,
+            docs_dir=settings.docs_dir,
+            force_all_matched=force_all_matched,
+        )
+        return result
+    except Exception as e:
+        logger.exception(f"위키 문서 기반 보고서 업데이트 오류: {e}")
+        raise HTTPException(status_code=500, detail=f"위키 문서 기반 업데이트 중 오류 발생: {str(e)}")
+
+@topic_router.post("/reports/{report_id}/update-wiki/async", response_model=AsyncTaskResponse)
+def update_report_with_wiki_async_endpoint(
+    report_id: str,
+    force_all_matched: bool = False,
+    settings: Settings = Depends(get_settings),
+    generator: TopicReportGenerator = Depends(get_generator),
+    task_manager: TaskManager = Depends(get_task_manager),
+):
+    """지정된 보고서에 대해 WikiDB 최신 위키 문서를 기반으로 비동기 증분 개정을 수행한다."""
+    existing = generator.get_report_detail(report_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="해당 생성 보고서를 찾을 수 없습니다.")
+
+    task_id = task_manager.create_task("topic_update_wiki")
+    docs_dir = settings.docs_dir
+
+    def _worker():
+        task_manager.update_task(task_id, 25, "최신 위키 문서 탐색 및 델타 지식 추출 중...")
+        result = generator.update_report_with_wiki_docs(
+            report_id=report_id,
+            docs_dir=docs_dir,
+            force_all_matched=force_all_matched,
+        )
+        task_manager.update_task(task_id, 95, "증분 개정 및 In-place 저장 완료...")
+        return result
+
+    task_manager.submit_task(task_id, _worker)
+    return AsyncTaskResponse(task_id=task_id, message="위키 문서 기반 증분 업데이트가 비동기 작업으로 시작되었습니다.")
 
 @topic_router.get("/reports/{report_id}/export/html")
 def export_topic_report_html(

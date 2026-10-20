@@ -26,6 +26,10 @@ from app.utils import (
     safe_remove_file,
     clean_markdown_typography,
     KNOWN_PUBLISHERS,
+    get_gemini_api_keys_list,
+    is_gemini_key_exhausted_or_invalid,
+    is_gemini_key_permanently_exhausted,
+    is_gemini_rate_limited,
 )
 
 # .env 파일 로드 (환경변수 보조)
@@ -153,11 +157,18 @@ class KordocWikiAgent:
         self,
         docs_dir: Path,
         assets_dir: Path,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        api_keys: Optional[list[str]] = None,
     ):
         self.docs_dir = docs_dir
         self.assets_dir = assets_dir
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if api_keys:
+            self.api_keys = api_keys
+        elif api_key:
+            self.api_keys = [api_key]
+        else:
+            self.api_keys = get_gemini_api_keys_list()
+        self.api_key = self.api_keys[0] if self.api_keys else None
         self.docs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
@@ -206,14 +217,16 @@ class KordocWikiAgent:
         heartbeat_cb: Optional[object] = None
     ) -> Optional[str]:
         """Gemini 멀티모달 API를 호출하여 kordoc-wiki-ingest 스킬 기준의 최고 품질 마크다운을 생성한다."""
-        if not self.api_key:
+        keys_to_try = self.api_keys or ([self.api_key] if self.api_key else get_gemini_api_keys_list())
+        if not keys_to_try:
             return None
+
+        model_names = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]
 
         try:
             from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=self.api_key)
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             ext = Path(original_filename).suffix.lstrip('.').upper() or "문서"
 
@@ -254,99 +267,145 @@ class KordocWikiAgent:
                 max_output_tokens=65536,  # Thinking 토큰 소모로 인한 본문 조기 절단 방지
             )
 
-            processed_parts = []
-            has_successful_chunk = False
-            for idx, chunk in enumerate(chunks):
-                if callable(heartbeat_cb):
-                    heartbeat_cb()
+            # 다중 API 키 순회 및 모델 폴백 적용
+            for key_idx, current_key in enumerate(keys_to_try, 1):
+                key_masked = f"{current_key[:8]}...{current_key[-4:]}" if len(current_key) > 12 else f"key#{key_idx}"
+                client = genai.Client(api_key=current_key)
+                key_failed = False
+                processed_parts = []
+                has_successful_chunk = False
 
-                is_first = (idx == 0)
-                part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
+                for idx, chunk in enumerate(chunks):
+                    if callable(heartbeat_cb):
+                        heartbeat_cb()
 
-                # 해당 청크의 Raw 마크다운에 실제로 존재하는 이미지 선별
-                chunk_img_refs = set(re.findall(r'!\[.*?\]\([^\)]*?([^\)\s/]+\.(?:png|jpg|jpeg|webp))', chunk))
-                chunk_images = [img for img in valid_images if img["filename"].lower() in {f.lower() for f in chunk_img_refs}] if len(chunks) > 1 else valid_images
+                    is_first = (idx == 0)
+                    part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
 
-                if chunk_images:
-                    lines = [f"[첨부 이미지 {i+1}] {img['filename']} -> /api/assets/{doc_id}/{img['filename']}"
-                             for i, img in enumerate(chunk_images)]
-                    chunk_images_index = "이 파트에 배치될 유효 이미지 목록:\n" + "\n".join(lines)
-                else:
-                    chunk_images_index = "(이 파트에는 포함된 이미지가 없습니다. 임의로 다른 파트의 이미지를 추가하지 마십시오.)"
+                    # 해당 청크의 Raw 마크다운에 실제로 존재하는 이미지 선별
+                    chunk_img_refs = set(re.findall(r'!\[.*?\]\([^\)]*?([^\)\s/]+\.(?:png|jpg|jpeg|webp))', chunk))
+                    chunk_images = [img for img in valid_images if img["filename"].lower() in {f.lower() for f in chunk_img_refs}] if len(chunks) > 1 else valid_images
 
-                chunk_image_parts = []
-                for img in chunk_images:
-                    img_path = img.get("path")
-                    if img_path and Path(img_path).exists():
-                        img_file = Path(img_path)
-                        mime = MIME_MAP.get(img_file.suffix.lower(), "image/png")
+                    if chunk_images:
+                        lines = [f"[첨부 이미지 {i+1}] {img['filename']} -> /api/assets/{doc_id}/{img['filename']}"
+                                 for i, img in enumerate(chunk_images)]
+                        chunk_images_index = "이 파트에 배치될 유효 이미지 목록:\n" + "\n".join(lines)
+                    else:
+                        chunk_images_index = "(이 파트에는 포함된 이미지가 없습니다. 임의로 다른 파트의 이미지를 추가하지 마십시오.)"
+
+                    chunk_image_parts = []
+                    for img in chunk_images:
+                        img_path = img.get("path")
+                        if img_path and Path(img_path).exists():
+                            img_file = Path(img_path)
+                            mime = MIME_MAP.get(img_file.suffix.lower(), "image/png")
+                            try:
+                                chunk_image_parts.append(types.Part.from_bytes(data=img_file.read_bytes(), mime_type=mime))
+                            except Exception as e:
+                                logger.warning(f"청크 이미지 로드 실패 ({img_file.name}): {e}")
+
+                    text_prompt = (
+                        f"다음은 '{original_filename}' ({part_label}) kordoc 1차 Raw 추출 데이터와 "
+                        f"{'위에 첨부된 실제 이미지 파일들' if chunk_images else '이미지 참조 정보'}입니다.\n\n"
+                        f"[문서 메타데이터]\n"
+                        f"- DOC_ID: {doc_id}\n"
+                        f"- ORIGINAL_FILENAME: {original_filename}\n"
+                        f"- EXT: {ext}\n"
+                        f"- NOW_TIME: {now_str}\n"
+                        f"- FILE_HASH: {file_hash}\n"
+                        f"- IS_FIRST_CHUNK: {'예 (메타데이터 헤더 및 전체 TOC 작성 필요)' if is_first else '아니오 (본문만 연속 작성, 메타데이터 헤더 불필요)'}\n\n"
+                        f"[이미지 에셋 경로 인덱스]\n"
+                        f"{chunk_images_index}\n\n"
+                        f"[kordoc Raw 추출 텍스트 ({part_label})]\n"
+                        f"```markdown\n"
+                        f"{chunk}\n"
+                        f"```\n\n"
+                        f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
+                        f"100% 무삭제 완본 마크다운을 작성하십시오.\n"
+                        f"★ [본문 연속성 및 인위적 분할 멘트 절대 금지]:\n"
+                        f"- 파트 구분 안내문(예: '파트 2에서 이어집니다', '여기까지 수록되었으며' 등)이나 임의의 종결 문구를 본문에 절대로 삽입하지 마십시오. 오직 원문 본문 내용만 100% 충실히 연속 작성하십시오.\n"
+                        f"★ [이미지 태그 엄격 보존 및 중복 생성 금지 규칙]:\n"
+                        f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/...)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
+                        f"2. 위 Raw 텍스트 본문에 등장하지 않는 다른 파트의 이미지를 서두나 특정 위치에 임의로 일괄 나열(dump)하거나 중복 삽입하지 마십시오.\n"
+                        f"3. 각 이미지가 실제로 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
+                    )
+
+                    message_content = [types.Part.from_text(text=text_prompt)] + chunk_image_parts
+
+                    # 모델 Fallback 시도
+                    chunk_success = False
+                    for model_name in model_names:
                         try:
-                            chunk_image_parts.append(types.Part.from_bytes(data=img_file.read_bytes(), mime_type=mime))
-                        except Exception as e:
-                            logger.warning(f"청크 이미지 로드 실패 ({img_file.name}): {e}")
+                            response = client.models.generate_content(
+                                model=model_name,
+                                contents=message_content,
+                                config=gen_config,
+                            )
+                            out_text = response.text.strip() if (response and response.text) else ""
+                            # 조기 절단(Truncation) 감지
+                            has_unclosed_link = bool(re.search(r'(?:\[[^\]]*|\]\([^\)]*)$', out_text))
+                            has_meta_or_toc = ("**원본 파일명**" in out_text or "## 목차" in out_text)
+                            is_truncated = has_unclosed_link or (
+                                has_meta_or_toc and len(chunk.strip()) >= 500 and len(out_text) < max(600, int(len(chunk.strip()) * 0.35))
+                            )
 
-                text_prompt = (
-                    f"다음은 '{original_filename}' ({part_label}) kordoc 1차 Raw 추출 데이터와 "
-                    f"{'위에 첨부된 실제 이미지 파일들' if chunk_images else '이미지 참조 정보'}입니다.\n\n"
-                    f"[문서 메타데이터]\n"
-                    f"- DOC_ID: {doc_id}\n"
-                    f"- ORIGINAL_FILENAME: {original_filename}\n"
-                    f"- EXT: {ext}\n"
-                    f"- NOW_TIME: {now_str}\n"
-                    f"- FILE_HASH: {file_hash}\n"
-                    f"- IS_FIRST_CHUNK: {'예 (메타데이터 헤더 및 전체 TOC 작성 필요)' if is_first else '아니오 (본문만 연속 작성, 메타데이터 헤더 불필요)'}\n\n"
-                    f"[이미지 에셋 경로 인덱스]\n"
-                    f"{chunk_images_index}\n\n"
-                    f"[kordoc Raw 추출 텍스트 ({part_label})]\n"
-                    f"```markdown\n"
-                    f"{chunk}\n"
-                    f"```\n\n"
-                    f"위 Raw 텍스트와 첨부 이미지를 모두 활용하여 kordoc-wiki-ingest 5대 원칙에 따라 "
-                    f"100% 무삭제 완본 마크다운을 작성하십시오.\n"
-                    f"★ [이미지 태그 엄격 보존 및 중복 생성 금지 규칙]:\n"
-                    f"1. 위 Raw 텍스트 본문 내에 이미 배치되어 있는 `![...](/api/assets/{doc_id}/...)` 태그의 파일명을 절대로 임의로 변경하거나 새로운 번호로 위조하지 마십시오. Raw 텍스트에 존재하는 정확한 이미지 파일명을 해당 문맥 위치에 100% 그대로 유지하십시오.\n"
-                    f"2. 위 Raw 텍스트 본문에 등장하지 않는 다른 파트의 이미지를 서두나 특정 위치에 임의로 일괄 나열(dump)하거나 중복 삽입하지 마십시오.\n"
-                    f"3. 각 이미지가 실제로 등장하는 본문 위치 바로 아래에, 첨부 이미지의 차트/도표를 직접 판독한 Dual-Mode 수치 표를 작성하십시오."
-                )
+                            # 단일 청크 문서에서 목차 작성 도중 조기 절단된 경우: LLM 실패로 판정하여 룰베이스 완본으로 폴백 유도
+                            if is_truncated and len(chunks) == 1:
+                                logger.warning("단일 청크 문서 조기 절단 감지 → 안전한 룰베이스 완본으로 폴백 유도")
+                                continue
 
-                message_content = [types.Part.from_text(text=text_prompt)] + chunk_image_parts
+                            if out_text and len(out_text) <= 30000 and not is_truncated:
+                                processed_parts.append(out_text)
+                                has_successful_chunk = True
+                                chunk_success = True
+                                logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(out_text)}자 생성, 모델: {model_name})")
+                                break
+                            elif len(chunks) > 1:
+                                # 다중 청크 분할 문서에서 특정 청크 출력이 비정상이거나 조기 절단된 경우, 전체 폐기 대신 해당 청크만 원본으로 보존
+                                logger.warning(
+                                    f"청크 {idx+1} 비정상/절단 출력 감지 (길이: {len(out_text)}자, 절단여부: {is_truncated}) → "
+                                    f"해당 청크만 원본 텍스트로 보존"
+                                )
+                                processed_parts.append(chunk.strip())
+                                has_successful_chunk = True
+                                chunk_success = True
+                                break
+                            else:
+                                logger.warning(
+                                    f"청크 {idx+1} 비정상/절단 출력 감지 (길이: {len(out_text)}자, 절단여부: {is_truncated}) → 다음 모델로 재시도합니다."
+                                )
+                                continue
+                        except Exception as chunk_err:
+                            if is_gemini_key_permanently_exhausted(chunk_err):
+                                logger.warning(
+                                    f"Gemini API 키 #{key_idx}({key_masked}) 크레딧 소진 또는 인증 오류 감지 ({chunk_err}). "
+                                    f"다음 대체 키로 자동 전환을 시도합니다."
+                                )
+                                key_failed = True
+                                break
+                            else:
+                                logger.warning(f"모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({chunk_err}), 다음 모델로 폴백합니다.")
 
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=message_content,
-                    config=gen_config,
-                )
+                    if key_failed:
+                        break
+                    if not chunk_success and len(chunks) > 1:
+                        # 다중 청크 문서에서 모든 모델 호출이 실패했으나 키가 살아있는 경우, 해당 청크를 원본 텍스트로 보존
+                        processed_parts.append(chunk.strip())
+                        chunk_success = True
 
+                if key_failed:
+                    continue
 
-                out_text = response.text.strip() if (response and response.text) else ""
-                # 조기 절단(Truncation) 감지: 열린 마크다운 링크로 끝나거나, 메타데이터/목차만 출력되고 본문이 증발한 경우
-                has_unclosed_link = bool(re.search(r'(?:\[[^\]]*|\]\([^\)]*)$', out_text))
-                has_meta_or_toc = ("**원본 파일명**" in out_text or "## 목차" in out_text)
-                is_truncated = has_unclosed_link or (
-                    has_meta_or_toc and len(chunk.strip()) >= 500 and len(out_text) < max(600, int(len(chunk.strip()) * 0.35))
-                )
-
-                # 비정상 초장문(무한 루프 환각) 또는 조기 절단 감지 시 해당 청크만 원본 텍스트로 대체하여 결과 보존
-                if out_text and len(out_text) <= 30000 and not is_truncated:
-                    processed_parts.append(out_text)
-                    has_successful_chunk = True
-                    logger.info(f"청크 {idx+1}/{len(chunks)} 변환 성공 ({len(out_text)}자 생성)")
+                # 모든 청크가 완전하게 처리되었을 때만 반환 (일부 누락된 미완성 결과물 저장 방지)
+                if len(processed_parts) == len(chunks):
+                    full_result = "\n\n".join(processed_parts)
+                    logger.info(f"멀티모달 kordoc-wiki-ingest 완성 ({original_filename}, 총 {len(full_result)}자, 키 #{key_idx})")
+                    return full_result
                 else:
                     logger.warning(
-                        f"청크 {idx+1} 비정상/절단 출력 감지 (길이: {len(out_text)}자, 절단여부: {is_truncated}) → "
-                        f"해당 청크만 원본 텍스트로 대체 (기존 {len(processed_parts)}개 청크 결과 보존)"
+                        f"청크 처리 불완전 ({len(processed_parts)}/{len(chunks)}개 완료, 키 #{key_idx}). "
+                        f"다음 대체 키로 재시도합니다."
                     )
-                    # 비정상 청크만 원본 텍스트로 대체하여 나머지 결과 보존
-                    processed_parts.append(chunk.strip())
-
-            # 정상 변환된 청크가 하나도 없는 경우(모든 청크 비정상 환각) 룰베이스 폴백 전환
-            if not has_successful_chunk:
-                logger.warning(f"모든 청크({len(chunks)}개) 비정상 출력 감지, 룰베이스 폴백 전환")
-                return None
-
-            full_result = "\n\n".join(processed_parts)
-            logger.info(f"멀티모달 kordoc-wiki-ingest 완성 ({original_filename}, 총 {len(full_result)}자)")
-            return full_result
 
         except Exception as e:
             logger.warning(f"LLM API 호출 중 오류 발생 (룰베이스 폴백 가동): {e}")
@@ -582,7 +641,8 @@ class KordocWikiAgent:
         file_hash: str
     ) -> Optional[str]:
         """Gemini Files API를 통해 PDF를 업로드하고 Chat 세션에서 무삭제 마크다운으로 변환한다."""
-        if not self.api_key:
+        keys_to_try = self.api_keys or ([self.api_key] if self.api_key else get_gemini_api_keys_list())
+        if not keys_to_try:
             return None
 
         # 50MB 초과 파일은 kordoc CLI 경로로 폴백
@@ -590,64 +650,75 @@ class KordocWikiAgent:
             logger.info(f"PDF 파일이 50MB를 초과하여 kordoc CLI 경로로 폴백: {source_path.name}")
             return None
 
-        uploaded_file = None
-        client = None
-        try:
-            from google import genai
-            from google.genai import types
+        from google import genai
+        from google.genai import types
 
-            client = genai.Client(api_key=self.api_key)
-            logger.info(f"PDF Files API 업로드 시작: {source_path.name}")
-            safe_display_name = re.sub(r"[^\w\.\-]", "_", source_path.name.encode("ascii", "ignore").decode("ascii")) or f"doc_{doc_id}.pdf"
-            uploaded_file = client.files.upload(
-                file=source_path,
-                config={"mime_type": "application/pdf", "display_name": safe_display_name}
-            )
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        prompt = (
+            f"다음 첨부된 PDF 문서('{source_path.name}')를 kordoc-wiki-ingest 5대 원칙에 따라 100% 무삭제 완본 마크다운으로 변환하십시오.\n\n"
+            f"[문서 메타데이터]\n"
+            f"- DOC_ID: {doc_id}\n"
+            f"- ORIGINAL_FILENAME: {source_path.name}\n"
+            f"- EXT: PDF\n"
+            f"- NOW_TIME: {now_str}\n"
+            f"- FILE_HASH: {file_hash}\n"
+            f"- IS_FIRST_CHUNK: 예 (메타데이터 헤더 및 전체 TOC 작성 필요)\n\n"
+            f"문서 내 모든 텍스트, 각주, 도표, 차트(Dual-Mode 수치 표 포함), 종합 재무제표를 단 하나의 생략 없이 완전하게 복원하십시오."
+        )
 
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            prompt = (
-                f"다음 첨부된 PDF 문서('{source_path.name}')를 kordoc-wiki-ingest 5대 원칙에 따라 100% 무삭제 완본 마크다운으로 변환하십시오.\n\n"
-                f"[문서 메타데이터]\n"
-                f"- DOC_ID: {doc_id}\n"
-                f"- ORIGINAL_FILENAME: {source_path.name}\n"
-                f"- EXT: PDF\n"
-                f"- NOW_TIME: {now_str}\n"
-                f"- FILE_HASH: {file_hash}\n"
-                f"- IS_FIRST_CHUNK: 예 (메타데이터 헤더 및 전체 TOC 작성 필요)\n\n"
-                f"문서 내 모든 텍스트, 각주, 도표, 차트(Dual-Mode 수치 표 포함), 종합 재무제표를 단 하나의 생략 없이 완전하게 복원하십시오."
-            )
-
-            chat = client.chats.create(
-                model="gemini-3.8-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
-                    temperature=0.2,
+        for key_idx, current_key in enumerate(keys_to_try, 1):
+            key_masked = f"{current_key[:8]}...{current_key[-4:]}" if len(current_key) > 12 else f"key#{key_idx}"
+            uploaded_file = None
+            client = None
+            try:
+                client = genai.Client(api_key=current_key)
+                logger.info(f"PDF Files API 업로드 시작 (키 #{key_idx}: {key_masked}): {source_path.name}")
+                safe_display_name = re.sub(r"[^\w\.\-]", "_", source_path.name.encode("ascii", "ignore").decode("ascii")) or f"doc_{doc_id}.pdf"
+                uploaded_file = client.files.upload(
+                    file=source_path,
+                    config={"mime_type": "application/pdf", "display_name": safe_display_name}
                 )
-            )
 
+                for model_name in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]:
+                    try:
+                        chat = client.chats.create(
+                            model=model_name,
+                            config=types.GenerateContentConfig(
+                                system_instruction=KORDOC_WIKI_INGEST_SYSTEM_PROMPT,
+                                temperature=0.2,
+                            )
+                        )
 
-            response = chat.send_message([
-                types.Part.from_uri(file_uri=uploaded_file.uri, mime_type="application/pdf"),
-                types.Part.from_text(text=prompt)
-            ])
+                        response = chat.send_message([
+                            types.Part.from_uri(file_uri=uploaded_file.uri, mime_type="application/pdf"),
+                            types.Part.from_text(text=prompt)
+                        ])
 
-            if response and response.text:
-                logger.info(f"PDF Files API 변환 성공: {source_path.name} ({len(response.text)}자)")
-                return response.text.strip()
+                        if response and response.text:
+                            logger.info(f"PDF Files API 변환 성공: {source_path.name} ({len(response.text)}자, 모델: {model_name})")
+                            return response.text.strip()
+                    except Exception as chat_e:
+                        if is_gemini_key_permanently_exhausted(chat_e):
+                            raise chat_e
+                        logger.warning(f"Files API 모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({chat_e}), 다음 모델로 폴백합니다.")
 
-            logger.warning(f"PDF Files API 응답 비어있음: {source_path.name}")
-            return None
+            except Exception as e:
+                if is_gemini_key_permanently_exhausted(e):
+                    logger.warning(
+                        f"PDF Files API 키 #{key_idx}({key_masked}) 크레딧 소진 또는 인증 오류 감지 ({e}). "
+                        f"다음 대체 키로 자동 전환을 시도합니다."
+                    )
+                    continue
+                logger.warning(f"PDF Files API 처리 중 오류 발생 (폴백 진행): {e}")
+            finally:
+                if client and uploaded_file and hasattr(uploaded_file, "name"):
+                    try:
+                        client.files.delete(name=uploaded_file.name)
+                        logger.info(f"Files API 임시 파일 삭제 완료: {uploaded_file.name}")
+                    except Exception as del_e:
+                        logger.warning(f"Files API 임시 파일 삭제 실패: {del_e}")
 
-        except Exception as e:
-            logger.warning(f"PDF Files API 처리 중 오류 발생 (폴백 진행): {e}")
-            return None
-        finally:
-            if client and uploaded_file and hasattr(uploaded_file, "name"):
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                    logger.info(f"Files API 임시 파일 삭제 완료: {uploaded_file.name}")
-                except Exception as del_e:
-                    logger.warning(f"Files API 임시 파일 삭제 실패: {del_e}")
+        return None
 
     def _validate_and_fix_image_links(
         self,
