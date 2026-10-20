@@ -419,6 +419,7 @@ def update_report_with_wiki_async_endpoint(
 def export_topic_report_html(
     report_id: str,
     download: bool = False,
+    print_mode: bool = False,
     generator: TopicReportGenerator = Depends(get_generator),
     exporter: HtmlDocExporter = Depends(get_html_doc_exporter)
 ):
@@ -429,8 +430,14 @@ def export_topic_report_html(
 
     title = report.get("title", f"AI_Report_{report_id}")
     try:
-        # 브라우저 직접 보기일 때는 가볍고 빠른 로딩을 위해 서버 상대경로 사용, 파일 다운로드일 때는 Base64 인라인화
-        html_content = exporter.export_html(report["content"], title=title, embed_images=download)
+        # 브라우저 직접 보기일 때는 가볍고 빠른 로딩을 위해 서버 상대경로 사용, 파일 다운로드/인쇄일 때는 Base64 인라인화
+        should_embed = download or print_mode
+        html_content = exporter.export_html(
+            report["content"],
+            title=title,
+            embed_images=should_embed,
+            auto_print=print_mode
+        )
     except Exception as e:
         logger.exception(f"HTML 보고서 생성 중 오류 발생: {e}")
         raise HTTPException(status_code=500, detail=f"HTML 보고서 생성 중 오류가 발생했습니다: {str(e)}")

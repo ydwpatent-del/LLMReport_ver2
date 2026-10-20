@@ -1476,36 +1476,66 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('독립 실행형 편집 가능 HTML 보고서를 새 탭에서 엽니다.', 'info');
   }
 
-  // 20-2. A4 규격 PDF 보고서 다운로드 (Blob 스트리밍으로 무결성 보장)
+  // 20-2. HTML 양식 100% 보존 고품질 PDF 저장/인쇄 (브라우저 벡터 엔진 활용)
   async function handleDownloadPdfReport() {
     const reportId = (currentDoc && currentDoc.id && currentDoc.id.startsWith('REPORT_') ? currentDoc.id : null)
       || currentActiveTopicReportId
       || (currentTopicReport && currentTopicReport.id);
     if (!reportId) {
-      showToast('다운로드할 보고서가 선택되지 않았습니다.', 'error');
+      showToast('저장할 보고서가 선택되지 않았습니다.', 'error');
       return;
     }
-    showToast('A4 PDF 보고서를 생성 및 다운로드 중입니다...', 'info');
+    showToast('HTML 보고서 양식 그대로 PDF 저장/인쇄 창을 준비 중입니다...', 'info');
     try {
-      const url = `/api/topic/reports/${encodeURIComponent(reportId)}/export/pdf`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `PDF 생성 실패 (${res.status})`);
-      }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = `${reportId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-      showToast('A4 PDF 보고서 다운로드가 완료되었습니다!', 'success');
+      const printUrl = `/api/topic/reports/${encodeURIComponent(reportId)}/export/html?print_mode=true`;
+
+      // 기존 인쇄 프레임이 남아있다면 제거
+      const oldFrame = document.getElementById('reportPrintFrame');
+      if (oldFrame) oldFrame.remove();
+
+      // 보이지 않는 백그라운드 iframe 생성하여 완본 HTML 로드 후 인쇄 트리거
+      const iframe = document.createElement('iframe');
+      iframe.id = 'reportPrintFrame';
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      iframe.src = printUrl;
+
+      let triggered = false;
+      const triggerPrint = () => {
+        if (triggered) return;
+        triggered = true;
+        try {
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+          showToast('인쇄 창에서 "PDF로 저장"을 선택하시면 HTML 양식 그대로 저장됩니다.', 'success');
+        } catch (e) {
+          console.warn('iframe 인쇄 실패, 새 탭 인쇄로 폴백합니다:', e);
+          const win = window.open(printUrl, '_blank');
+          if (!win) window.location.href = printUrl;
+        }
+      };
+
+      iframe.onload = () => {
+        setTimeout(triggerPrint, 350);
+      };
+
+      // 타임아웃 안전장치 (지연 시 2.5초 후 폴백 창 열기)
+      setTimeout(() => {
+        if (!triggered) {
+          triggerPrint();
+        }
+      }, 2500);
+
+      document.body.appendChild(iframe);
     } catch (err) {
-      console.error('PDF 다운로드 실패:', err);
-      showToast(`PDF 다운로드 실패: ${err.message}`, 'error');
+      console.error('PDF 인쇄 창 호출 실패:', err);
+      // 최종 비상 폴백: 백엔드 바이너리 직접 다운로드
+      const fallbackUrl = `/api/topic/reports/${encodeURIComponent(reportId)}/export/pdf`;
+      window.open(fallbackUrl, '_blank');
     }
   }
 

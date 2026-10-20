@@ -148,6 +148,11 @@ def test_router_export_endpoints(tmp_path: Path):
     quoted_id = urllib.parse.quote(report_id)
     assert f"{quoted_id}.html" in res_html_dl.headers.get("content-disposition", "")
 
+    # 2-1. HTML 내보내기 (인쇄 모드: print_mode=true)
+    res_html_print = client.get(f"/api/topic/reports/{report_id}/export/html?print_mode=true")
+    assert res_html_print.status_code == 200
+    assert "window.print()" in res_html_print.text
+
     # 3. PDF 내보내기 (다운로드 모드)
     res_pdf = client.get(f"/api/topic/reports/{report_id}/export/pdf")
     assert res_pdf.status_code == 200

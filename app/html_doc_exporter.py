@@ -231,6 +231,135 @@ body {
 """
 
 
+# PyMuPDF Story 전용 인라인 A4 스타일 (CSS 변수 제거 및 절대 헥스 컬러/시스템 폰트 직결)
+PDF_EXPORT_STYLE = """
+body {
+  margin: 0;
+  font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', 'NanumGothic', 'Noto Sans CKR', sans-serif;
+  color: #1f2937;
+  background: #ffffff;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+#doc-content {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+#doc-content h1 {
+  font-size: 22px;
+  font-weight: bold;
+  color: #1e3a8a;
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #cbd5e1;
+}
+
+#doc-content h2 {
+  font-size: 17px;
+  font-weight: bold;
+  color: #1e293b;
+  margin: 24px 0 10px;
+  padding-left: 8px;
+  border-left: 4px solid #2563eb;
+}
+
+#doc-content h3 {
+  font-size: 14.5px;
+  font-weight: bold;
+  color: #334155;
+  margin: 18px 0 8px;
+}
+
+#doc-content h4 {
+  font-size: 13.5px;
+  font-weight: bold;
+  color: #475569;
+  margin: 14px 0 6px;
+}
+
+#doc-content p {
+  margin: 8px 0;
+  text-align: justify;
+}
+
+#doc-content hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 20px 0;
+}
+
+#doc-content blockquote {
+  margin: 12px 0;
+  padding: 8px 14px;
+  border-left: 4px solid #2563eb;
+  background-color: #f8fafc;
+  color: #334155;
+  font-size: 12.5px;
+}
+
+#doc-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#doc-content th, #doc-content td {
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  text-align: left;
+  vertical-align: top;
+}
+
+#doc-content th {
+  background-color: #f1f5f9;
+  font-weight: bold;
+  color: #1e293b;
+}
+
+#doc-content tr:nth-child(even) td {
+  background-color: #f8fafc;
+}
+
+#doc-content code {
+  font-family: monospace;
+  font-size: 12px;
+  background-color: #f1f5f9;
+  padding: 2px 4px;
+  color: #0f172a;
+}
+
+#doc-content pre {
+  background-color: #1e293b;
+  color: #f8fafc;
+  padding: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+#doc-content img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 14px auto 6px;
+  border: 1px solid #e2e8f0;
+}
+
+#doc-content p > em:only-child {
+  display: block;
+  text-align: center;
+  font-size: 11.5px;
+  color: #4b5563;
+  margin-top: 2px;
+  margin-bottom: 14px;
+}
+"""
+
+
 class HtmlDocExporter:
     """마크다운 보고서를 /html-doc 스킬 규격의 편집 가능 HTML 및 A4 PDF로 변환하는 클래스."""
 
@@ -424,7 +553,8 @@ body{ margin:0; font-family:-apple-system,'Pretendard','Segoe UI',system-ui,sans
         self,
         report_markdown: str,
         title: str = "AI 기술 보고서",
-        embed_images: bool = True
+        embed_images: bool = True,
+        auto_print: bool = False
     ) -> str:
         """
         /html-doc 스킬 규격을 완벽히 충족하는 독립 실행형 편집 가능 HTML 문서를 생성한다.
@@ -466,6 +596,19 @@ body{ margin:0; font-family:-apple-system,'Pretendard','Segoe UI',system-ui,sans
             logger.error("스켈레톤 템플릿에서 <main id=\"doc-content\"> 컨테이너를 찾지 못했습니다.")
             raise ValueError("html-doc 규격에 맞는 #doc-content 컨테이너가 스켈레톤에 존재하지 않습니다.")
 
+        if auto_print:
+            print_script = """<script>
+window.addEventListener('load', function() {
+  setTimeout(function() {
+    window.print();
+  }, 400);
+});
+</script>"""
+            if "</body>" in template:
+                template = template.replace("</body>", f"{print_script}\n</body>")
+            else:
+                template += f"\n{print_script}"
+
         return template
 
     def export_pdf(self, report_markdown: str, title: str = "AI 기술 보고서") -> bytes:
@@ -490,7 +633,7 @@ body{ margin:0; font-family:-apple-system,'Pretendard','Segoe UI',system-ui,sans
 <meta charset="utf-8">
 <title>{title}</title>
 <style>
-{REPORT_DOCUMENT_STYLE}
+{PDF_EXPORT_STYLE}
 </style>
 </head>
 <body>
