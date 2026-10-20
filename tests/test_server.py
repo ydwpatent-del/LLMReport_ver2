@@ -407,4 +407,41 @@ def test_cloud_mode_protections(tmp_path: Path):
     assert "지원되지 않는 파일 형식" in res_exe.json()["detail"]
 
 
+def test_pwa_endpoints_and_pin_bypass(tmp_path: Path):
+    """PWA 필수 엔드포인트(매니페스트, 서비스 워커, 파비콘) 서빙 및 PIN 인증 면제 동작을 검증한다."""
+    settings = Settings(
+        base_dir=tmp_path,
+        source_dir=tmp_path / "Source",
+        wiki_db_dir=tmp_path / "WikiDB",
+        docs_dir=tmp_path / "WikiDB" / "docs",
+        assets_dir=tmp_path / "WikiDB" / "assets",
+        manifest_path=tmp_path / "WikiDB" / "manifest.json",
+        storage_mode="local",
+        wiki_access_pin="123456"
+    )
+    settings.ensure_directories()
+    manifest_mgr = ManifestManager(settings.manifest_path)
+    app = create_app(settings, manifest_mgr)
+    client = TestClient(app)
+
+    # 1. PIN 잠금 상태에서 보호된 API는 401 Unauthorized
+    res_api = client.get("/api/documents")
+    assert res_api.status_code == 401
+
+    # 2. PWA 필수 파일은 PIN 미인증 상태에서도 200 OK 반환
+    res_manifest = client.get("/manifest.webmanifest")
+    assert res_manifest.status_code == 200
+    assert "application/manifest+json" in res_manifest.headers["content-type"]
+
+    res_sw = client.get("/service-worker.js")
+    assert res_sw.status_code == 200
+    assert "application/javascript" in res_sw.headers["content-type"]
+    assert res_sw.headers.get("Service-Worker-Allowed") == "/"
+
+    res_favicon = client.get("/favicon.ico")
+    assert res_favicon.status_code == 200
+    assert "image/png" in res_favicon.headers["content-type"]
+
+
+
 

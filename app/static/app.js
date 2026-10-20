@@ -1794,3 +1794,16 @@ document.addEventListener('DOMContentLoaded', () => {
   loadTopicHistory();
 });
 
+// PWA 지원을 위한 서비스 워커 등록
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/service-worker.js')
+      .then((reg) => {
+        console.log('LLM Wiki PWA 서비스 워커 등록 완료:', reg.scope);
+      })
+      .catch((err) => {
+        console.warn('PWA 서비스 워커 등록 실패:', err);
+      });
+  });
+}

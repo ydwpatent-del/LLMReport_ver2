@@ -217,7 +217,14 @@ def create_app(
                     failed_login_attempts.pop(client_ip, None)
 
         if active_pin:
-            exempt_paths = {"/login", "/api/auth/login", "/api/auth/logout"}
+            exempt_paths = {
+                "/login",
+                "/api/auth/login",
+                "/api/auth/logout",
+                "/manifest.webmanifest",
+                "/service-worker.js",
+                "/favicon.ico"
+            }
             is_exempt = path in exempt_paths or path.startswith("/static/")
             if not is_exempt:
                 salt_suffix = settings.gdrive_folder_id or ""
@@ -328,6 +335,37 @@ def create_app(
         if index_file.exists():
             return FileResponse(index_file)
         return HTMLResponse("<h1>LLM Wiki Server is Running</h1>")
+
+    @app.get("/manifest.webmanifest")
+    async def serve_manifest():
+        """PWA 웹앱 매니페스트를 반환한다."""
+        manifest_file = static_dir / "manifest.webmanifest"
+        if manifest_file.exists():
+            return FileResponse(manifest_file, media_type="application/manifest+json")
+        raise HTTPException(status_code=404, detail="Manifest not found")
+
+    @app.get("/service-worker.js")
+    async def serve_service_worker():
+        """PWA 서비스 워커 스크립트를 반환한다."""
+        sw_file = static_dir / "service-worker.js"
+        if sw_file.exists():
+            return FileResponse(
+                sw_file,
+                media_type="application/javascript",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Service-Worker-Allowed": "/"
+                }
+            )
+        raise HTTPException(status_code=404, detail="Service worker not found")
+
+    @app.get("/favicon.ico")
+    async def serve_favicon():
+        """기본 파비콘 및 웹앱 아이콘을 반환한다."""
+        icon_file = static_dir / "icons" / "icon-192.png"
+        if icon_file.exists():
+            return FileResponse(icon_file, media_type="image/png")
+        raise HTTPException(status_code=404, detail="Favicon not found")
 
     @app.get("/api/documents", response_model=list[DocumentResponse])
     async def list_documents():
