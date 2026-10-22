@@ -54,6 +54,14 @@ class Settings(BaseModel):
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
 
+# 공통 Gemini Fallback 모델 체인
+DEFAULT_GEMINI_MODELS: list[str] = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+]
+
 _settings_instance: Optional[Settings] = None
 
 def get_settings() -> Settings:
@@ -63,3 +71,8 @@ def get_settings() -> Settings:
         _settings_instance = Settings()
         _settings_instance.ensure_directories()
     return _settings_instance
+
+def reset_settings_cache() -> None:
+    """설정 싱글톤 캐시를 초기화한다 (테스트 환경 격리 및 런타임 설정 리로드 지원)."""
+    global _settings_instance
+    _settings_instance = None

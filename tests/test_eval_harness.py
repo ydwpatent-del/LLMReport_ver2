@@ -99,7 +99,8 @@ def test_golden_reports_evaluation_benchmark():
 
 def test_async_task_endpoints():
     """FastAPI 비동기 작업 조회 엔드포인트의 정상 작동을 검증한다."""
-    client = TestClient(app)
+    test_app = create_app()
+    client = TestClient(test_app)
 
     # 존재하지 않는 태스크 조회 시 404
     resp = client.get("/api/topic/tasks/task_nonexistent_999")

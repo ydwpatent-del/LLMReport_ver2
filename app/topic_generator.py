@@ -16,6 +16,7 @@ load_dotenv()
 
 from app.topic_search import search_relevant_sections
 from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid, is_gemini_key_permanently_exhausted
+from app.config import DEFAULT_GEMINI_MODELS
 
 logger = logging.getLogger("TopicReportGenerator")
 
@@ -523,7 +524,7 @@ class TopicReportGenerator:
 
     def _call_gemini_api(self, prompt: str, log_subject: str) -> str:
         """다중 API 키 로테이션 및 모델 Fallback을 적용하여 Gemini LLM 텍스트 생성을 수행한다."""
-        model_names = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+        model_names = DEFAULT_GEMINI_MODELS
         response_text = None
         last_error = None
 

@@ -531,28 +531,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // 5-1. 마크다운 표, 이미지 분리, 출처 표기 보정 공통 전처리기
+  function preprocessMarkdown(content) {
+    if (!content || typeof content !== 'string') return '';
+    let text = content;
+
+    // [마크다운 표 종결 경계 정규화 및 인라인 이미지 독립 분리 (GFM 셀 오염 방어)]
+    text = text.replace(/([>)]|\*(?:[^*]+)\*)\s*(!\[[^\n\]]*\]\([^\n\)]+\))/g, '$1\n\n$2');
+    text = text.replace(/(\|[^\n]*\|)[ \t]*\n(?=[^|\n])/g, '$1\n\n');
+    text = text.replace(/((?:^|\n)(?!\s*\|)[^\n|]+?)[ \t]*\n(?=\|[^\n]+\|\n[ \t]*\|(?:\s*:?-+:?\s*\|)+)/g, '$1\n\n');
+
+    // [출처 표기 백틱 제거 및 대괄호 중첩 링크 보정]
+    text = text.replace(/`\s*(<출처\s*:[^>]+>)\s*`/g, '$1');
+    text = text.replace(/`\s*(\[[^\]\n]+\]\((?:\/api\/documents\/)?[^)\n]+\))\s*`/g, '$1');
+    text = text.replace(/\[\s*\[([^\]]+)\]\s*([^\]]*)\]\(([^)]+)\)/g, '[($1) $2]($3)');
+    text = text.replace(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g, '[($1)$2]($3)');
+
+    // [소제목 및 헤딩 경계 분리 (인라인 결합 및 뭉침 방어)]
+    text = text.replace(/([^\n#])[ \t]*(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
+
+    return text;
+  }
+
   // 6. 안전하고 강력한 마크다운 렌더링 함수
   async function renderMarkdownContent(content) {
     if (rawContent) rawContent.textContent = content;
 
     try {
       let html = '';
-      let preprocessed = content || '';
-
-      // [마크다운 표 종결 경계 정규화 및 인라인 이미지 독립 분리 (GFM 셀 오염 방어)]
-      preprocessed = preprocessed.replace(/([>)]|\*(?:[^*]+)\*)\s*(!\[[^\n\]]*\]\([^\n\)]+\))/g, '$1\n\n$2');
-      preprocessed = preprocessed.replace(/(\|[^\n]*\|)[ \t]*\n(?=[^|\n])/g, '$1\n\n');
-      preprocessed = preprocessed.replace(/((?:^|\n)(?!\s*\|)[^\n|]+?)[ \t]*\n(?=\|[^\n]+\|\n[ \t]*\|(?:\s*:?-+:?\s*\|)+)/g, '$1\n\n');
-
-      // [출처 표기 백틱 제거 및 대괄호 중첩 링크 보정]
-      preprocessed = preprocessed.replace(/`\s*(<출처\s*:[^>]+>)\s*`/g, '$1');
-      preprocessed = preprocessed.replace(/`\s*(\[[^\]\n]+\]\((?:\/api\/documents\/)?[^)\n]+\))\s*`/g, '$1');
-      preprocessed = preprocessed.replace(/\[\s*\[([^\]]+)\]\s*([^\]]*)\]\(([^)]+)\)/g, '[($1) $2]($3)');
-      preprocessed = preprocessed.replace(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g, '[($1)$2]($3)');
-
-      // [소제목 및 헤딩 경계 분리 (인라인 결합 및 뭉침 방어)]
-      preprocessed = preprocessed.replace(/([^\n#])[ \t]*(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
-
+      let preprocessed = preprocessMarkdown(content || '');
       const normalizedContent = preprocessed.replace(/<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>/g, '[$1]($2)');
 
       // 1. Marked.js 파싱 시도
@@ -1195,23 +1202,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderTopicMarkdown(mdText) {
     if (!topicRenderedContent) return;
 
-    // [동일 문헌 출처 태그 사전 중복 병합 방어 (대괄호 중첩 지원)]
-    let preprocessedMd = mdText || '';
-
-    // [마크다운 표 종결 경계 정규화 및 인라인 이미지 독립 분리 (GFM 셀 오염 방어)]
-    preprocessedMd = preprocessedMd.replace(/([>)]|\*(?:[^*]+)\*)\s*(!\[[^\n\]]*\]\([^\n\)]+\))/g, '$1\n\n$2');
-    preprocessedMd = preprocessedMd.replace(/(\|[^\n]*\|)[ \t]*\n(?=[^|\n])/g, '$1\n\n');
-    preprocessedMd = preprocessedMd.replace(/((?:^|\n)(?!\s*\|)[^\n|]+?)[ \t]*\n(?=\|[^\n]+\|\n[ \t]*\|(?:\s*:?-+:?\s*\|)+)/g, '$1\n\n');
-
-    // [출처 표기 백틱 제거 및 대괄호 중첩 링크 보정]
-    preprocessedMd = preprocessedMd.replace(/`\s*(<출처\s*:[^>]+>)\s*`/g, '$1');
-    preprocessedMd = preprocessedMd.replace(/`\s*(\[[^\]\n]+\]\((?:\/api\/documents\/)?[^)\n]+\))\s*`/g, '$1');
-    preprocessedMd = preprocessedMd.replace(/\[\s*\[([^\]]+)\]\s*([^\]]*)\]\(([^)]+)\)/g, '[($1) $2]($3)');
-    preprocessedMd = preprocessedMd.replace(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g, '[($1)$2]($3)');
-    // [소제목 및 헤딩 경계 분리 (인라인 결합 및 뭉침 방어)]
-    preprocessedMd = preprocessedMd.replace(/([^\n#])[ \t]*(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
-
-    // 출처 태그 그룹 병합 시 뒤따르는 개행문자(\n\n)를 삼키지 않도록 수평 공백([ \t]*)만 매칭
+    // [공통 전처리기 적용: 표 정규화, 인라인 이미지 분리, 출처 표기 보정]
+    let preprocessedMd = preprocessMarkdown(mdText || '');
     preprocessedMd = preprocessedMd.replace(/(?:<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>[ \t]*,?[ \t]*)+/g, (full) => {
       const regex = /<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>/g;
       let match;
@@ -1368,20 +1360,58 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 4000);
 
     try {
-      const res = await fetch('/api/topic/generate', {
+      // 1. 비동기 작업 등록 요청 (Cloud Run 및 모바일 타임아웃 방어)
+      const res = await fetch('/api/topic/generate/async', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic: topic })
       });
 
-      clearInterval(stageTimer);
-
       if (!res.ok) {
+        clearInterval(stageTimer);
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `보고서 생성 실패 (${res.status})`);
+        throw new Error(errData.detail || `보고서 작업 등록 실패 (${res.status})`);
       }
 
-      const reportData = await res.json();
+      const { task_id } = await res.json();
+
+      // 2. 1초 주기로 백그라운드 작업 상태 폴링 (최대 180초 대기)
+      let pollCount = 0;
+      let reportData = null;
+      while (pollCount < 180) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        pollCount++;
+
+        try {
+          const statusRes = await fetch(`/api/topic/tasks/${encodeURIComponent(task_id)}`);
+          if (!statusRes.ok) continue;
+
+          const task = await statusRes.json();
+          // 실시간 진행 상황 UI 업데이트
+          if (task.message && loadingStageTitle) {
+            loadingStageTitle.textContent = task.message;
+          }
+          if (typeof task.progress === 'number' && loadingProgressBar) {
+            loadingProgressBar.style.width = `${Math.max(task.progress, 15)}%`;
+          }
+
+          if (task.status === 'COMPLETED') {
+            reportData = task.result;
+            break;
+          } else if (task.status === 'FAILED') {
+            throw new Error(task.error || '보고서 생성 작업에 실패하였습니다.');
+          }
+        } catch (pollErr) {
+          if (pollErr.message && pollErr.message.includes('실패')) throw pollErr;
+          console.warn('작업 상태 폴링 일시 오류 (재시도 중):', pollErr);
+        }
+      }
+
+      clearInterval(stageTimer);
+
+      if (!reportData) {
+        throw new Error('보고서 생성 대기 시간이 초과되었습니다. 잠시 후 보고서 목록을 확인해 주십시오.');
+      }
       currentTopicReport = reportData;
       currentActiveTopicReportId = reportData.id;
 
@@ -1783,10 +1813,35 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 26. 주기적 자동 폴링 (기존 5초 유지)
-  setInterval(() => {
-    fetchDocuments();
-  }, 5000);
+  // 26. 스마트 자동 폴링 (Page Visibility API 적용: 모바일 배터리/데이터 절감)
+  let documentPollingTimer = null;
+
+  function startSmartPolling() {
+    if (documentPollingTimer) clearInterval(documentPollingTimer);
+    documentPollingTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchDocuments();
+      }
+    }, 5000);
+  }
+
+  function stopSmartPolling() {
+    if (documentPollingTimer) {
+      clearInterval(documentPollingTimer);
+      documentPollingTimer = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      fetchDocuments();
+      startSmartPolling();
+    } else {
+      stopSmartPolling();
+    }
+  });
+
+  startSmartPolling();
 
   // 초기 실행
   fetchDocuments();

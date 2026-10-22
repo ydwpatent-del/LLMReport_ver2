@@ -65,6 +65,8 @@ class IngestAgent:
         # 동시 처리 방지를 위한 파일 경로 집합 및 락 (TOCTOU 방지)
         self._processing_files: set[Path] = set()
         self._lock = threading.Lock()
+        # Google Drive 동기화 및 번들 생성 동시성 제어용 상호 배제 락
+        self._sync_lock = threading.Lock()
 
     def process_file(self, file_path: Path, debounce: float = 0.2) -> bool:
         """단일 파일에 대해 해시 계산 및 중복 방지 검사 후 마크다운 변환을 수행한다."""
@@ -209,44 +211,45 @@ class IngestAgent:
             return
 
         def _worker():
-            try:
-                from app.gdrive_storage import get_gdrive_storage
-                from app.config import get_settings
+            with self._sync_lock:
+                try:
+                    from app.gdrive_storage import get_gdrive_storage
+                    from app.config import get_settings
 
-                settings = get_settings()
-                storage = self.storage or get_gdrive_storage()
-                wiki_db_dir = self.manifest_mgr.manifest_path.parent
+                    settings = get_settings()
+                    storage = self.storage or get_gdrive_storage()
+                    wiki_db_dir = self.manifest_mgr.manifest_path.parent
 
-                # 1. 텍스트 번들(3.7MB) 자동 갱신
-                bundle_info = storage.create_text_bundle(wiki_db_dir)
-                logger.info(
-                    f"📦 [자동 훅] 신규 문서 인제스트 후 텍스트 번들 자동 갱신 완료 "
-                    f"({bundle_info['bundle_size_bytes'] / (1024 * 1024):.2f}MB, 문서 {bundle_info['docs_count']}건)"
-                )
-
-                # 실제 운영 WikiDB 경로와 일치하지 않는 임시 경로(테스트 등)인 경우 원격 Google Drive API 자동 푸시 원천 차단
-                is_prod_db = (wiki_db_dir.resolve() == settings.wiki_db_dir.resolve())
-
-                # 2. 로컬 구글 드라이브 데스크톱 폴더가 설정된 경우 즉시 복사/동기화 (운영 DB인 경우에만)
-                if storage.has_mirror_dir and is_prod_db:
-                    sync_res = storage.sync_with_mirror_dir(
-                        wiki_db_dir,
-                        storage.settings.gdrive_local_mirror_dir,
-                        include_assets=True,
+                    # 1. 텍스트 번들(3.7MB) 자동 갱신
+                    bundle_info = storage.create_text_bundle(wiki_db_dir)
+                    logger.info(
+                        f"📦 [자동 훅] 신규 문서 인제스트 후 텍스트 번들 자동 갱신 완료 "
+                        f"({bundle_info['bundle_size_bytes'] / (1024 * 1024):.2f}MB, 문서 {bundle_info['docs_count']}건)"
                     )
-                    logger.info(f"✨ [자동 훅] Google Drive 데스크톱 폴더 자동 동기화 완료: {sync_res}")
 
-                # 3. Google Drive API가 설정되어 있고 운영 DB인 경우에만 원격 업로드 시도
-                elif storage.is_api_configured and is_prod_db:
-                    try:
-                        push_res = storage.push_all_to_gdrive_api(wiki_db_dir=wiki_db_dir, upload_assets=True)
-                        logger.info(f"✨ [자동 훅] Google Drive API 원격 동기화 완료: {push_res}")
-                    except Exception as api_err:
-                        logger.debug(f"원격 API 자동 푸시 스킵 또는 오류 (로컬 번들 유지): {api_err}")
-                elif not is_prod_db:
-                    logger.debug("비운영/테스트 WikiDB 경로이므로 원격 Google Drive API 동기화를 건너뜁니다.")
-            except Exception as e:
-                logger.warning(f"인제스트 후 Google Drive 자동 동기화 훅 처리 중 오류 (인제스트는 정상 완료): {e}")
+                    # 실제 운영 WikiDB 경로와 일치하지 않는 임시 경로(테스트 등)인 경우 원격 Google Drive API 자동 푸시 원천 차단
+                    is_prod_db = (wiki_db_dir.resolve() == settings.wiki_db_dir.resolve())
+
+                    # 2. 로컬 구글 드라이브 데스크톱 폴더가 설정된 경우 즉시 복사/동기화 (운영 DB인 경우에만)
+                    if storage.has_mirror_dir and is_prod_db:
+                        sync_res = storage.sync_with_mirror_dir(
+                            wiki_db_dir,
+                            storage.settings.gdrive_local_mirror_dir,
+                            include_assets=True,
+                        )
+                        logger.info(f"✨ [자동 훅] Google Drive 데스크톱 폴더 자동 동기화 완료: {sync_res}")
+
+                    # 3. Google Drive API가 설정되어 있고 운영 DB인 경우에만 원격 업로드 시도
+                    elif storage.is_api_configured and is_prod_db:
+                        try:
+                            push_res = storage.push_all_to_gdrive_api(wiki_db_dir=wiki_db_dir, upload_assets=True)
+                            logger.info(f"✨ [자동 훅] Google Drive API 원격 동기화 완료: {push_res}")
+                        except Exception as api_err:
+                            logger.debug(f"원격 API 자동 푸시 스킵 또는 오류 (로컬 번들 유지): {api_err}")
+                    elif not is_prod_db:
+                        logger.debug("비운영/테스트 WikiDB 경로이므로 원격 Google Drive API 동기화를 건너뜁니다.")
+                except Exception as e:
+                    logger.warning(f"인제스트 후 Google Drive 자동 동기화 훅 처리 중 오류 (인제스트는 정상 완료): {e}")
 
         threading.Thread(target=_worker, daemon=True).start()
 

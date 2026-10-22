@@ -31,6 +31,7 @@ from app.utils import (
     is_gemini_key_permanently_exhausted,
     is_gemini_rate_limited,
 )
+from app.config import DEFAULT_GEMINI_MODELS
 
 # .env 파일 로드 (환경변수 보조)
 load_dotenv()
@@ -221,7 +222,7 @@ class KordocWikiAgent:
         if not keys_to_try:
             return None
 
-        model_names = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+        model_names = DEFAULT_GEMINI_MODELS
 
         try:
             from google import genai
@@ -679,7 +680,7 @@ class KordocWikiAgent:
                     config={"mime_type": "application/pdf", "display_name": safe_display_name}
                 )
 
-                for model_name in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]:
+                for model_name in DEFAULT_GEMINI_MODELS:
                     try:
                         chat = client.chats.create(
                             model=model_name,
