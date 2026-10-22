@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -280,6 +281,11 @@ class KordocWikiAgent:
                     if callable(heartbeat_cb):
                         heartbeat_cb()
 
+                    # 보조키(무료 티어) 사용 시 15 RPM 한도 초과 방지를 위한 청크 간 안전 대기
+                    if key_idx > 1 and idx > 0:
+                        logger.info(f"보조키(무료 티어 #{key_idx}) 사용 중: 15 RPM 한도 보호를 위해 3.5초 대기 후 청크 {idx+1} 처리...")
+                        time.sleep(3.5)
+
                     is_first = (idx == 0)
                     part_label = f"파트 {idx+1}/{len(chunks)}" if len(chunks) > 1 else "전체"
 
@@ -384,6 +390,24 @@ class KordocWikiAgent:
                                 )
                                 key_failed = True
                                 break
+                            elif is_gemini_rate_limited(chunk_err):
+                                logger.warning(f"모델 '{model_name}' (키 #{key_idx}) 일시적 속도/할당량 제한(429) 감지 → 4초 쿨다운 후 1회 재시도...")
+                                time.sleep(4.0)
+                                try:
+                                    response = client.models.generate_content(
+                                        model=model_name,
+                                        contents=message_content,
+                                        config=gen_config,
+                                    )
+                                    out_text = response.text.strip() if (response and response.text) else ""
+                                    if out_text and len(out_text) <= 30000:
+                                        processed_parts.append(out_text)
+                                        has_successful_chunk = True
+                                        chunk_success = True
+                                        logger.info(f"청크 {idx+1}/{len(chunks)} 429 쿨다운 재시도 성공 ({len(out_text)}자 생성, 모델: {model_name})")
+                                        break
+                                except Exception as retry_err:
+                                    logger.warning(f"모델 '{model_name}' 429 재시도 실패 ({retry_err}), 다음 모델로 폴백합니다.")
                             else:
                                 logger.warning(f"모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({chunk_err}), 다음 모델로 폴백합니다.")
 
@@ -701,7 +725,21 @@ class KordocWikiAgent:
                     except Exception as chat_e:
                         if is_gemini_key_permanently_exhausted(chat_e):
                             raise chat_e
-                        logger.warning(f"Files API 모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({chat_e}), 다음 모델로 폴백합니다.")
+                        elif is_gemini_rate_limited(chat_e):
+                            logger.warning(f"Files API 모델 '{model_name}' (키 #{key_idx}) 429 감지 → 4초 쿨다운 후 1회 재시도...")
+                            time.sleep(4.0)
+                            try:
+                                response = chat.send_message([
+                                    types.Part.from_uri(file_uri=uploaded_file.uri, mime_type="application/pdf"),
+                                    types.Part.from_text(text=prompt)
+                                ])
+                                if response and response.text:
+                                    logger.info(f"PDF Files API 429 재시도 성공: {source_path.name} ({len(response.text)}자, 모델: {model_name})")
+                                    return response.text.strip()
+                            except Exception as retry_e:
+                                logger.warning(f"Files API 429 재시도 실패 ({retry_e}), 다음 모델로 폴백합니다.")
+                        else:
+                            logger.warning(f"Files API 모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({chat_e}), 다음 모델로 폴백합니다.")
 
             except Exception as e:
                 if is_gemini_key_permanently_exhausted(e):

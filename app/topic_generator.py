@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.topic_search import search_relevant_sections
-from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid, is_gemini_key_permanently_exhausted
+from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid, is_gemini_key_permanently_exhausted, is_gemini_rate_limited
 from app.config import DEFAULT_GEMINI_MODELS
 
 logger = logging.getLogger("TopicReportGenerator")
@@ -540,6 +540,11 @@ class TopicReportGenerator:
             key_masked = f"{current_key[:8]}...{current_key[-4:]}" if len(current_key) > 12 else "key"
             key_failed = False
 
+            # 보조키(무료 티어) 사용 시 15 RPM 한도 초과 방지를 위한 호출 전 안전 대기
+            if key_idx > 1:
+                logger.info(f"보조키(무료 티어 #{key_idx}) 사용 중: 15 RPM 한도 보호를 위해 2.5초 대기 후 보고서 생성...")
+                time.sleep(2.5)
+
             for model_name in model_names:
                 try:
                     logger.info(f"Gemini 모델 '{model_name}' (키 #{key_idx}: {key_masked}) 호출 시도 중: {log_subject}")
@@ -559,6 +564,20 @@ class TopicReportGenerator:
                         )
                         key_failed = True
                         break
+                    elif is_gemini_rate_limited(e):
+                        logger.warning(f"Gemini 모델 '{model_name}' (키 #{key_idx}) 일시적 속도 제한(429) 감지 → 4초 쿨다운 후 1회 재시도...")
+                        time.sleep(4.0)
+                        try:
+                            retry_res = client.models.generate_content(
+                                model=model_name,
+                                contents=prompt
+                            )
+                            if retry_res and retry_res.text:
+                                response_text = retry_res.text
+                                logger.info(f"Gemini 모델 '{model_name}' 429 쿨다운 재시도 성공: {log_subject}")
+                                break
+                        except Exception as retry_e:
+                            logger.warning(f"Gemini 모델 '{model_name}' 429 재시도 실패 ({retry_e}), 다음 모델로 폴백합니다.")
                     else:
                         logger.warning(f"Gemini 모델 '{model_name}' (키 #{key_idx}) 호출 오류 ({e}), 다음 모델로 폴백합니다.")
 
