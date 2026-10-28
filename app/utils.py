@@ -875,15 +875,29 @@ def clean_markdown_typography(markdown_text: str) -> str:
     text = re.sub(r'\n{4,}', r'\n\n\n', text)
 
     # 3. 본문 인용부 치환 (예: 'Transformer1)' -> 'Transformer[^1]')
+    # 과거 정규식 오작동으로 파손된 출처 링크 URL 말미(예: _69fd4fd[^8])를 우선 복원
+    text = re.sub(r'(/api/documents/[^\s)>\]]+?)\[\^(\d+)\](?=[,>\s\)]|$)', r'\1\2)', text)
+
     if footnotes:
+        # 마크다운 링크 URL 내부가 각주 치환에 의해 훼손되지 않도록 임시 보호
+        protected_urls: list[str] = []
+        def _mask_url(m: re.Match) -> str:
+            protected_urls.append(m.group(0))
+            return f"__MD_URL_PROTECT_{len(protected_urls) - 1}__"
+
+        text = re.sub(r'\]\([^)\n]+\)', _mask_url, text)
+
         for num in sorted(footnotes.keys()):
             term, desc = footnotes[num]
             if term:
                 # 용어명 바로 뒤에 붙은 각주 번호 우선 치환 (예: Transformer1) -> Transformer[^1])
                 text = re.sub(rf'({re.escape(term)})\s*{num}\)', rf'\1[^{num}]', text)
             # 일반적인 문자 뒤의 각주 번호 치환 (예: 모달리티4) -> 모달리티[^4], 구조)3) -> 구조)[^3])
-            # 단, 연도 표현(예: 2023, 2024 등)의 숫자나 대문자 약어(예: FP4, GPT4 등)가 오인 치환되지 않도록 가드 적용
-            text = re.sub(rf'(?<!\d)(?<![A-Z])([가-힣A-Za-z\)])\s*{num}\)', rf'\1[^{num}]', text)
+            # 단, 연도 표현(예: 2023, 2024 등)의 숫자나 대문자 약어(예: FP4, GPT4 등), 해시 문자열이 오인 치환되지 않도록 가드 적용
+            text = re.sub(rf'(?<!\d)(?<![A-Z0-9_])([가-힣A-Za-z\)])\s*{num}\)', rf'\1[^{num}]', text)
+
+        for idx, orig_url in enumerate(protected_urls):
+            text = text.replace(f"__MD_URL_PROTECT_{idx}__", orig_url)
 
         # 4. 수집된 모든 각주를 문서 최하단에 단일 표준 GFM 각주 섹션으로 배치
         fn_section = "\n\n---\n\n### 📌 각주 (Footnotes)\n\n"
@@ -986,6 +1000,7 @@ def resolve_citation_links(markdown_text: str, docs_dir: Optional[Path] = None) 
         if already_link:
             title = already_link.group(1).strip()
             did = already_link.group(2).strip().replace('/api/documents/', '')
+            did = re.sub(r'\[\^(\d+)\]$', r'\1', did).rstrip('],>.)')
             return (title, did)
 
         # 2-2. 텍스트 정제
@@ -1061,7 +1076,8 @@ def resolve_citation_links(markdown_text: str, docs_dir: Optional[Path] = None) 
 
         return ", ".join(f"<출처: {item}>" for item in resolved_items)
 
-    # 백틱으로 둘러싸인 출처 태그 및 링크의 백틱 벗기기
+    # 백틱으로 둘러싸인 출처 태그 및 링크의 백틱 벗기기 + 파손된 각주 URL 복원
+    markdown_text = re.sub(r'(/api/documents/[^\s)>\]]+?)\[\^(\d+)\](?=[,>\s\)]|$)', r'\1\2)', markdown_text)
     markdown_text = re.sub(r'`\s*(<출처\s*:[^>]+>)\s*`', r'\1', markdown_text)
     markdown_text = re.sub(r'`\s*(\[[^\]\n]+\]\((?:/api/documents/)?[^)\n]+\))\s*`', r'\1', markdown_text)
 

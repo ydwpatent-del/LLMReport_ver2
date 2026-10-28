@@ -541,11 +541,11 @@ document.addEventListener('DOMContentLoaded', () => {
     text = text.replace(/(\|[^\n]*\|)[ \t]*\n(?=[^|\n])/g, '$1\n\n');
     text = text.replace(/((?:^|\n)(?!\s*\|)[^\n|]+?)[ \t]*\n(?=\|[^\n]+\|\n[ \t]*\|(?:\s*:?-+:?\s*\|)+)/g, '$1\n\n');
 
-    // [출처 표기 백틱 제거 및 대괄호 중첩 링크 보정]
+    // [출처 표기 백틱 제거, 파손된 각주 URL 복원 및 대괄호 중첩 링크 보정]
+    text = text.replace(/(\/api\/documents\/[^\s)>\]]+?)\[\^(\d+)\](?=[,>\s\)]|$)/g, '$1$2)');
     text = text.replace(/`\s*(<출처\s*:[^>]+>)\s*`/g, '$1');
     text = text.replace(/`\s*(\[[^\]\n]+\]\((?:\/api\/documents\/)?[^)\n]+\))\s*`/g, '$1');
-    text = text.replace(/\[\s*\[([^\]]+)\]\s*([^\]]*)\]\(([^)]+)\)/g, '[($1) $2]($3)');
-    text = text.replace(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g, '[($1)$2]($3)');
+    text = text.replace(/\[\s*\[([^\[\]\n]+)\]\s*([^\[\]\n]*)\]\(([^)\n]+)\)/g, '[($1) $2]($3)');
 
     // [소제목 및 헤딩 경계 분리 (인라인 결합 및 뭉침 방어)]
     text = text.replace(/([^\n#])[ \t]*(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
@@ -560,7 +560,28 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       let html = '';
       let preprocessed = preprocessMarkdown(content || '');
-      const normalizedContent = preprocessed.replace(/<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>/g, '[$1]($2)');
+      preprocessed = preprocessed.replace(/(?:<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>[ \t]*,?[ \t]*)+/g, (full) => {
+        const regex = /<출처\s*:\s*\[(.*?)\]\(((?:\/api\/documents\/)?[^)]+)\)>/g;
+        let match;
+        const seen = new Set();
+        const unique = [];
+        while ((match = regex.exec(full)) !== null) {
+          const title = match[1];
+          const link = match[2];
+          const key = title.replace(/[\s_()\[\]\-\.]+/g, '').toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(`<출처: [${title}](${link})>`);
+          }
+        }
+        return unique.join(', ');
+      });
+      const normalizedContent = preprocessed.replace(/<출처\s*:\s*([^>]+)>/g, (match, inner) => {
+        if (inner.includes('](')) {
+          return inner.trim();
+        }
+        return `<span class="source-badge"><i class="fa-solid fa-bookmark text-amber-400 mr-1"></i><span>&lt;출처 : <span class="font-semibold text-indigo-100">${inner.trim()}</span>&gt;</span></span>`;
+      });
 
       // 1. Marked.js 파싱 시도
       if (window.marked) {
@@ -700,14 +721,35 @@ document.addEventListener('DOMContentLoaded', () => {
           } catch (e) {}
         }
 
-        // [출처 링크 시각적 알약 배지화]
+        // [출처 링크 시각적 알약 배지화 및 문서 뷰어 내 클릭 이동 바인딩]
         renderedContent.querySelectorAll('a').forEach(link => {
           const href = link.getAttribute('href') || '';
           const text = link.textContent.trim();
-          if (href.startsWith('/api/documents/') || text.includes('출처')) {
+          const isSourceLink = href.startsWith('/api/documents/') || href.includes('/documents/') || text.includes('출처');
+          if (isSourceLink) {
             link.className = 'source-badge';
+            link.title = '클릭 시 지식 DB 원본 문서로 이동하여 완본 열람';
             let cleanText = text.replace(/^[<\[\s]*출처\s*:\s*/, '').replace(/[>\]\s]*$/, '');
             link.innerHTML = `<i class="fa-solid fa-bookmark text-amber-400 mr-1"></i><span>&lt;출처 : <span class="font-semibold text-indigo-100 underline decoration-indigo-400/50">${cleanText || '원본 문서'}</span>&gt;</span>`;
+
+            if (href.includes('/documents/')) {
+              link.addEventListener('click', async (e) => {
+                e.preventDefault();
+                const parts = href.split('/api/documents/');
+                const rawDocId = parts.length > 1 ? parts[1] : href.split('/').pop();
+                const cleanDocId = decodeURIComponent(rawDocId)
+                  .replace(/\[\^(\d+)\][,\]\)]*$/, '$1')
+                  .replace(/[\],>.)]+$/, '')
+                  .trim();
+
+                showToast(`지식 DB 원본 문서로 이동: ${cleanDocId}`, 'info');
+                switchTab('viewer');
+                await loadDocument(cleanDocId);
+                if (renderedContent && renderedContent.parentElement) {
+                  renderedContent.parentElement.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+              });
+            }
           }
         });
       }
@@ -1295,7 +1337,10 @@ document.addEventListener('DOMContentLoaded', () => {
           e.preventDefault();
           const parts = href.split('/api/documents/');
           const rawDocId = parts.length > 1 ? parts[1] : href.split('/').pop();
-          const cleanDocId = decodeURIComponent(rawDocId).trim();
+          const cleanDocId = decodeURIComponent(rawDocId)
+            .replace(/\[\^(\d+)\][,\]\)]*$/, '$1')
+            .replace(/[\],>.)]+$/, '')
+            .trim();
 
           showToast(`지식 DB 원본 문서로 이동: ${cleanDocId}`, 'info');
           switchTab('viewer');

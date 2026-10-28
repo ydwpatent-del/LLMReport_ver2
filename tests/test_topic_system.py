@@ -1249,4 +1249,34 @@ def test_save_report_inplace_and_debounce_guard(tmp_path):
     mock_client.models.generate_content.assert_not_called()  # LLM API 호출되지 않음
 
 
+def test_embedding_402_fallback_to_secondary_key():
+    """유료 키가 402 소진 상태일 때 2번째 모델을 헛돌지 않고 즉시 보조 키로 폴백되는지 검증."""
+    from app.topic_search import get_embedding
+
+    # 402 오류를 발생시키는 주 클라이언트 (유료 키 소진 상태)
+    mock_client_402 = MagicMock()
+    mock_client_402.models.embed_content.side_effect = RuntimeError("402 Payment Required: Credit depleted")
+
+    # 정상 작동하는 보조 클라이언트
+    mock_client_ok = MagicMock()
+    mock_res = MagicMock()
+    mock_emb = MagicMock()
+    mock_emb.values = [0.1, 0.2, 0.3]
+    mock_res.embeddings = [mock_emb]
+    mock_client_ok.models.embed_content.return_value = mock_res
+
+    # 1회차 호출: 유료 키에서 402 발생 -> gemini-embedding-2를 찌르지 않고 즉시 보조 키로 폴백하여 성공
+    vec1 = get_embedding("첫 번째 쿼리", client=mock_client_402, fallback_clients=[mock_client_ok])
+    assert vec1 == [0.1, 0.2, 0.3]
+    assert mock_client_402.models.embed_content.call_count == 1
+    assert mock_client_ok.models.embed_content.call_count == 1
+
+    # 동일 검색 내 2회차 호출: 이미 소진 확인된 유료 키를 다시 찌르지 않고 보조 키로 바로 처리
+    vec2 = get_embedding("두 번째 쿼리", client=mock_client_402, fallback_clients=[mock_client_ok])
+    assert vec2 == [0.1, 0.2, 0.3]
+    assert mock_client_402.models.embed_content.call_count == 1
+    assert mock_client_ok.models.embed_content.call_count == 2
+
+
+
 

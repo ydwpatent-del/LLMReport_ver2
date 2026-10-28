@@ -111,3 +111,64 @@ def test_html_and_pdf_export_without_sublist_indentation():
     assert any("015-027" in link for link in doc_links), "015-027 문서 링크가 누락되었습니다."
     assert any("ibk" in link.lower() for link in doc_links), "ibk투자증권 문서 링크가 누락되었습니다."
     assert any("SOCAMM" in link for link in doc_links), "SOCAMM 문서 링크가 누락되었습니다."
+
+
+def test_footnote_regex_does_not_corrupt_doc_hash_url_and_heals_broken_url():
+    """해시가 알파벳+숫자로 끝나는 출처 URL(...69fd4fd8))이 각주([^8])로 오인 치환되지 않으며, 이미 파손된 링크도 복원되는지 검증."""
+    raw_md = (
+        "생성형 AI는 딥러닝8) 기술을 기반으로 발전하였다 "
+        "<출처: [생성형 AI](/api/documents/통합_J58222_생성형_AI_20260430_N_1788933051_69fd4fd8)>.\n"
+        "또한 이미 파손된 링크도 복구되어야 한다 "
+        "<출처: [인공지능 반도체](/api/documents/플러스_인공지능_반도체_20211228_N_1789007534_8b24cbd[^2]>.\n\n"
+        "[^2]: **NPU**: 신경망 처리 장치\n"
+        "[^8]: **딥러닝**: 심층 신경망 학습 기술\n"
+    )
+    cleaned = clean_markdown_typography(raw_md)
+
+    assert "딥러닝[^8]" in cleaned
+    assert "/api/documents/통합_J58222_생성형_AI_20260430_N_1788933051_69fd4fd8)" in cleaned
+    assert "69fd4fd[^8]" not in cleaned
+    assert "/api/documents/플러스_인공지능_반도체_20211228_N_1789007534_8b24cbd2)" in cleaned
+    assert "8b24cbd[^2]" not in cleaned
+
+
+def test_find_document_entry_resolves_all_report_citation_links():
+    """WikiDB/reports 내 모든 보고서의 /api/documents/... 출처 링크가 _find_document_entry를 통해 100% 매칭되는지 검증."""
+    from app.manifest import ManifestManager
+    from app.server import _find_document_entry
+
+    manifest_path = Path("WikiDB/manifest.json")
+    reports_dir = Path("WikiDB/reports")
+    if not manifest_path.exists() or not reports_dir.exists():
+        pytest.skip("WikiDB 데이터가 없습니다.")
+
+    mm = ManifestManager(manifest_path)
+    unresolved = []
+
+    for rpt in reports_dir.glob("*.md"):
+        text = rpt.read_text(encoding="utf-8")
+        links = re.findall(r'/api/documents/([^\)\s>]+)', text)
+        for lk in set(links):
+            entry = _find_document_entry(lk, mm)
+            if entry is None:
+                unresolved.append(f"{rpt.name} -> {lk}")
+
+    assert not unresolved, f"매칭되지 않은 출처 문서 링크가 존재합니다: {unresolved}"
+
+
+def test_frontend_app_js_citation_preprocessing_and_click_binding():
+    """app.js의 전처리기가 한 문단 내 다중 출처 및 각주[^1]를 삼키지 않고, renderMarkdownContent에 클릭 내비게이션이 바인딩되어 있는지 검증."""
+    app_js = Path("app/static/app.js").read_text(encoding="utf-8")
+
+    # 1. 문장 전체를 삼키는 문제의 정규식(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g)이 제거되었는지 확인
+    assert r"text.replace(/\[([^\]\n]+)\]([^\]\n]+)\]\(([^)\n]+)\)/g" not in app_js
+
+    # 2. renderMarkdownContent 영역 내 source-badge 바인딩 시 click 이벤트 리스너와 loadDocument 호출이 존재하는지 확인
+    render_fn_match = re.search(
+        r'async function renderMarkdownContent\(content\)\s*\{([\s\S]*?)function buildTableOfContents',
+        app_js
+    )
+    assert render_fn_match is not None
+    render_fn_body = render_fn_match.group(1)
+    assert "addEventListener('click'" in render_fn_body
+    assert "loadDocument(" in render_fn_body

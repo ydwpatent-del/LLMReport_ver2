@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from app.utils import get_gemini_api_keys_list
+from app.utils import get_gemini_api_keys_list, is_gemini_key_permanently_exhausted
 
 logger = logging.getLogger("TopicSearch")
 
@@ -110,11 +110,11 @@ def get_embedding(
 
     # 2. 호출 대상 클라이언트 목록 구성
     all_clients = []
-    if client:
+    if client and getattr(client, "_key_exhausted", False) is not True:
         all_clients.append(client)
     if fallback_clients:
         for fb in fallback_clients:
-            if fb not in all_clients:
+            if fb not in all_clients and getattr(fb, "_key_exhausted", False) is not True:
                 all_clients.append(fb)
 
     if not all_clients:
@@ -137,6 +137,13 @@ def get_embedding(
                             cache.set(clean_text, values)
                         return values
             except Exception as e:
+                if is_gemini_key_permanently_exhausted(e):
+                    logger.warning(f"Gemini API 키 크레딧 소진(402) 또는 인증 오류 감지 ({e}). 다음 보조 키로 폴백합니다.")
+                    try:
+                        setattr(cli, "_key_exhausted", True)
+                    except Exception:
+                        pass
+                    break
                 logger.debug(f"임베딩 모델 '{model_name}' 호출 오류: {e}")
                 continue
 
@@ -360,7 +367,7 @@ def search_relevant_sections(topic: str, docs_dir: Path, top_k: int = 5) -> list
         # 시맨틱(Semantic) 벡터 임베딩 유사도 계산 (어휘 불일치 구출)
         if query_vector:
             doc_repr = f"{title}\n{orig_filename}\n{content[:1000]}"
-            doc_emb = get_embedding(doc_repr, client, cache)
+            doc_emb = get_embedding(doc_repr, client, cache, fallback_clients=fallback_clients)
             if doc_emb:
                 sim = cosine_similarity(query_vector, doc_emb)
                 if sim > 0.55:

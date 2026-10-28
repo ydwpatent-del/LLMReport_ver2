@@ -111,6 +111,10 @@ def _find_document_entry(doc_id_or_title: str, manifest_mgr: ManifestManager) ->
     구버전 ID 호환: 클라이언트가 구버전 ID를 요청하더라도 자가 치유된 최신 문서를 원본 파일명 및 접두사로 탐색한다.
     """
     clean_id = urllib.parse.unquote(doc_id_or_title).strip()
+    # 각주 치환 오작동 잔재([^8] 등) 및 불필요한 말미 문장부호 복원/정제
+    clean_id = re.sub(r'\[\^(\d+)\][,\]\)]*$', r'\1', clean_id)
+    clean_id = clean_id.rstrip('],>.)')
+
     # 1. 정확한 ID 일치
     doc = manifest_mgr.get_document(clean_id) or manifest_mgr.get_document(doc_id_or_title)
     if doc:
@@ -134,6 +138,14 @@ def _find_document_entry(doc_id_or_title: str, manifest_mgr: ManifestManager) ->
             return d
         if d.original_filename and clean_stem.lower() in Path(d.original_filename).stem.lower():
             return d
+
+    # 4. 고유 타임스탬프+해시 접미사(_1788741121_ee2fee5c 등) 기반 매칭 (본문 내 파일명 일부 오타 대응)
+    suffix_match = re.search(r'_(\d+_[a-fA-F0-9]{6,8}|[a-fA-F0-9]{7,8})$', clean_id)
+    if suffix_match:
+        sfx = suffix_match.group(1).lower()
+        for d in all_docs:
+            if sfx in d.id.lower():
+                return d
 
     return None
 
