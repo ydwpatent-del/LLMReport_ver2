@@ -9,6 +9,27 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger("ManifestManager")
 
+def _extract_title_from_markdown(file_path: Path) -> Optional[str]:
+    """마크다운 파일의 앞부분에서 레벨 1 헤더(# 제목)를 추출하고 인라인 서식을 정제한다."""
+    if not file_path.exists() or not file_path.is_file():
+        return None
+    try:
+        sample = file_path.read_text(encoding="utf-8", errors="replace")[:4096]
+        # 멀티라인 정규식으로 레벨 1 헤더(# 제목) 탐색
+        match = re.search(r'^#\s+(.+)$', sample, re.MULTILINE)
+        if not match:
+            return None
+        raw_title = match.group(1).strip()
+        # 마크다운 서식 정제 (링크 [text](url) -> text, 볼드/이탤릭/인라인 코드 제거)
+        cleaned = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', raw_title)
+        cleaned = re.sub(r'[*_`]', '', cleaned)
+        cleaned = re.sub(r'<!--.*?-->', '', cleaned)
+        cleaned = cleaned.strip()
+        return cleaned if cleaned else None
+    except Exception as e:
+        logger.warning(f"마크다운 제목 추출 실패 ({file_path.name}): {e}")
+        return None
+
 class DocumentEntry(BaseModel):
     """개별 인제스트 문서 메타데이터 모델."""
     id: str
@@ -220,6 +241,11 @@ class ManifestManager:
                         doc.status = "completed"
                         doc.error_message = None
 
+                        # 마크다운 본문 H1 제목 동기화
+                        md_title = _extract_title_from_markdown(best_md)
+                        if md_title:
+                            doc.title = md_title
+
                         # 에셋 디렉터리 동기화
                         candidate_asset = assets_dir / matched_doc_id
                         if candidate_asset.exists() and candidate_asset.is_dir():
@@ -232,6 +258,12 @@ class ManifestManager:
                             self._data.documents[matched_doc_id] = alias_entry
 
                         reconciled_count += 1
+                else:
+                    # 실존하는 유효 완본의 경우, 마크다운 H1 제목과 매니페스트 제목 간 정합성 검사 및 자가 치유
+                    md_title = _extract_title_from_markdown(target_path)
+                    if md_title and doc.title != md_title:
+                        doc.title = md_title
+                        reconciled_count += 1
 
             # 3. 디스크에는 존재하나 매니페스트에 누락된 고아 마크다운 파일 등록
             registered_targets = {
@@ -242,14 +274,13 @@ class ManifestManager:
                 if resolved_md not in registered_targets and md_file.stat().st_size > 0:
                     # 마크다운 헤더 파싱
                     try:
-                        content_sample = md_file.read_text(encoding="utf-8", errors="replace")[:3000]
+                        content_sample = md_file.read_text(encoding="utf-8", errors="replace")[:4096]
                         orig_fn_match = re.search(r'원본 파일명\*\*:\s*(.+)', content_sample)
                         hash_match = re.search(r'무결성 해시.*?\*\*:\s*([a-fA-F0-9]{64})', content_sample)
-                        title_match = re.search(r'^#\s*(.+)', content_sample)
 
                         extracted_orig = orig_fn_match.group(1).strip() if orig_fn_match else md_file.stem
                         extracted_hash = hash_match.group(1).strip() if hash_match else ""
-                        extracted_title = title_match.group(1).strip() if title_match else md_file.stem
+                        extracted_title = _extract_title_from_markdown(md_file) or md_file.stem
 
                         # 이미 동일 해시의 정상 문서가 등록되어 있다면 중복 방지 및 디스크 잔여 파일 정리
                         if extracted_hash and any(d.file_hash == extracted_hash and d.status == "completed" for d in self._data.documents.values()):
@@ -301,4 +332,21 @@ class ManifestManager:
                 self._save()
 
             return {"reconciled": reconciled_count, "new_registered": new_registered_count}
+
+    def reconcile_titles_from_markdown(self, docs_dir: Path) -> int:
+        """디스크의 모든 마크다운 파일 H1 제목을 기준으로 매니페스트 내의 문서 제목을 전수 검사하고 치유한다."""
+        with self._lock:
+            self._data = self._load()
+            healed_count = 0
+            for doc in self._data.documents.values():
+                md_path = Path(doc.target_md_path) if doc.target_md_path else (docs_dir / f"{doc.id}.md")
+                if md_path.exists() and md_path.is_file():
+                    h1_title = _extract_title_from_markdown(md_path)
+                    if h1_title and doc.title != h1_title:
+                        doc.title = h1_title
+                        healed_count += 1
+            if healed_count > 0:
+                self._save()
+                logger.info(f"마크다운 H1 기반 문서 제목 {healed_count}건 자가 치유 완료")
+            return healed_count
 

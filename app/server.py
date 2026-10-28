@@ -401,6 +401,30 @@ def create_app(
             unique_by_hash[d.file_hash] = d
 
         result = list(unique_by_hash.values())
+
+        # 마크다운 H1 제목 기반 자가 치유 (제목이 파일명 형식이거나 누락된 경우)
+        for doc_item in result:
+            md_path = Path(doc_item.target_md_path) if doc_item.target_md_path else None
+            orig_stem = Path(doc_item.original_filename).stem if doc_item.original_filename else ""
+            is_raw_name = (
+                not doc_item.title or 
+                doc_item.title == doc_item.original_filename or 
+                doc_item.title == orig_stem or 
+                doc_item.title.startswith("file") or 
+                re.match(r'^\d{8}_[a-zA-Z0-9_-]+$', doc_item.title)
+            )
+            if is_raw_name and md_path and md_path.exists() and md_path.is_file():
+                try:
+                    sample = md_path.read_text(encoding="utf-8", errors="replace")[:4096]
+                    h1_match = re.search(r'^#\s+(.+)$', sample, re.MULTILINE)
+                    if h1_match:
+                        cleaned = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', h1_match.group(1).strip())
+                        cleaned = re.sub(r'[*_`]', '', cleaned).strip()
+                        if cleaned:
+                            doc_item.title = cleaned
+                except Exception:
+                    pass
+
         return sorted(result, key=lambda d: d.ingested_at, reverse=True)
 
     @app.get("/api/documents/{doc_id:path}", response_model=DocumentDetailResponse)
@@ -438,6 +462,16 @@ def create_app(
                 doc.error_message = None
                 manifest_mgr.add_or_update_document(doc)
                 logger.info(f"문서 상세 조회 중 자가 치유 성공: {doc.title} -> {best_md.name}")
+
+        # 마크다운 본문의 H1 대제목을 감지하여 제목 동기화 보장
+        if content:
+            h1_match = re.search(r'^#\s+(.+)$', content[:4096], re.MULTILINE)
+            if h1_match:
+                cleaned_title = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', h1_match.group(1).strip())
+                cleaned_title = re.sub(r'[*_`]', '', cleaned_title).strip()
+                if cleaned_title and doc.title != cleaned_title:
+                    doc.title = cleaned_title
+                    manifest_mgr.add_or_update_document(doc)
 
         return DocumentDetailResponse(
             id=doc.id,

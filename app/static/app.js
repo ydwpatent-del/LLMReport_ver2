@@ -262,7 +262,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Fast-path: 선택 상태, 문서 ID, 변환 상태가 동일한 경우 DOM 덮어쓰기 생략 (스크롤 튐 방지)
     const selectedId = currentDoc ? currentDoc.id : '';
     const currentSignature = docListContainer.getAttribute('data-list-sig') || '';
-    const newSignature = `${selectedId}::` + filtered.map(d => `${d.id}:${d.status}`).join(',');
+    const newSignature = `${selectedId}::` + filtered.map(d => `${d.id}:${d.status}:${d.title || ''}`).join(',');
     if (currentSignature === newSignature && docListContainer.querySelectorAll('.doc-card').length > 0) {
       return;
     }
@@ -446,6 +446,18 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
           docPdfBtn.classList.add('hidden');
           docPdfBtn.classList.remove('flex');
+        }
+      }
+      // 마크다운 본문의 레벨 1 대제목(# 제목) 추출 및 동기화
+      if (currentDoc.content) {
+        const h1Match = currentDoc.content.match(/^#\s+(.+)$/m);
+        if (h1Match && h1Match[1]) {
+          const extractedH1 = h1Match[1].replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1').replace(/[*_`]/g, '').trim();
+          if (extractedH1) {
+            currentDoc.title = extractedH1;
+            const targetListItem = documents.find(d => d.id === currentDoc.id);
+            if (targetListItem) targetListItem.title = extractedH1;
+          }
         }
       }
       if (docTitleHeading) docTitleHeading.textContent = currentDoc.title || currentDoc.original_filename;
