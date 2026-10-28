@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.topic_search import search_relevant_sections
+from app.topic_search import search_relevant_sections, search_relevant_sections_for_report
 from app.utils import get_gemini_api_keys_list, is_gemini_key_exhausted_or_invalid, is_gemini_key_permanently_exhausted, is_gemini_rate_limited
 from app.config import DEFAULT_GEMINI_MODELS
 
@@ -616,7 +616,15 @@ class TopicReportGenerator:
         if not target_docs_dir.exists():
             raise RuntimeError(f"WikiDB 문서 디렉터리를 찾을 수 없습니다: {target_docs_dir}")
 
-        matched_docs = search_relevant_sections(topic, target_docs_dir, top_k=7)
+        # 다차원 지식 프로필 및 LLM 키워드 확장을 통한 정밀 하이브리드 검색 수행
+        matched_docs = search_relevant_sections_for_report(
+            report_markdown=current_md,
+            topic=topic,
+            docs_dir=target_docs_dir,
+            report_mtime=report_mtime,
+            top_k=7,
+            api_key=self.api_key,
+        )
         if not matched_docs:
             return {"updated": False, "message": "관련 위키 문서를 찾을 수 없습니다.", **detail}
 

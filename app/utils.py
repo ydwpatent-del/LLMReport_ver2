@@ -575,6 +575,15 @@ def heal_markdown_table_boundaries(markdown_text: str) -> str:
     # 2-5) 출처 태그, 마침표, 일반 본문 직후에 개행 없이 인라인으로 붙어버린 모든 헤딩(#{1,6} ) 앞에 빈 줄(\n\n) 강제 분리
     text = re.sub(r'([^\n#])[ \t]*(#{1,6}\s+[^\n]+)', r'\1\n\n\2', text)
 
+    # 2-6) 불릿 하위나 4칸 이상 들여쓰기로 인해 마크다운 파서가 코드블록으로 오인식하는 표 행 앞의 들여쓰기 평탄화 (^|)
+    text = re.sub(r'^[ \t]+(\|[^\n]+\|[ \t]*)$', r'\1', text, flags=re.MULTILINE)
+
+    # 2-7) 표 내부 파이프 행 사이에 실수로 끼어든 고립된 빈 줄(\n\n) 자동 봉합 (반복 적용으로 다중 분할 표 완벽 봉합)
+    for _ in range(10):
+        if not re.search(r'(\|[^\n]+\|[ \t]*)\n{2,}[ \t]*(\|[^\n]+\|[ \t]*)', text):
+            break
+        text = re.sub(r'(\|[^\n]+\|[ \t]*)\n{2,}[ \t]*(\|[^\n]+\|[ \t]*)', r'\1\n\2', text)
+
     # 3. 닫는 파이프 없이 줄바꿈되어 두 동강 난 표 행(| 셀1\n\n| 셀2 |...) 자동 봉합
     text = re.sub(
         r'(^|\n)[ \t]*\|([^|\n]*)\n+[ \t]*(\|(?:[^|\n]*\|)+)',
@@ -610,7 +619,7 @@ def heal_markdown_table_boundaries(markdown_text: str) -> str:
         stripped = line.strip()
         if is_table_row(line):
             in_table = True
-            healed_lines.append(line)
+            healed_lines.append(stripped)
         else:
             if in_table:
                 in_table = False
