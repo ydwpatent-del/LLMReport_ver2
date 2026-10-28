@@ -1071,17 +1071,22 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 11. Source 폴더 수동 스캔 실행
+  // 11. Source 폴더 및 Google Drive 원격 동기화 실행 (로컬/클라우드 하이브리드 지원)
   if (scanBtn) {
     scanBtn.addEventListener('click', async () => {
       if (scanIcon) scanIcon.classList.add('animate-spin');
       try {
         const res = await fetch('/api/scan', { method: 'POST' });
         const data = await res.json();
-        showToast(`스캔 완료: 신규 ${data.processed_count}건 변환, ${data.skipped_count}건 중복 건너뜀`, 'success');
+        if (!res.ok) {
+          showToast(data.detail || '동기화 중 오류가 발생했습니다.', 'error');
+          return;
+        }
+        const successMsg = data.message || `동기화 완료: ${data.processed_count || 0}건 갱신`;
+        showToast(successMsg, 'success');
         await fetchDocuments();
       } catch (err) {
-        showToast('스캔 중 오류가 발생했습니다.', 'error');
+        showToast('동기화 통신 중 오류가 발생했습니다.', 'error');
       } finally {
         if (scanIcon) scanIcon.classList.remove('animate-spin');
       }

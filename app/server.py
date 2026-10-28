@@ -638,15 +638,40 @@ def create_app(
 
     @app.post("/api/scan")
     async def trigger_scan():
-        """Source 폴더를 즉시 수동 스캔한다."""
-        if agent is None:
-            raise HTTPException(status_code=500, detail="인제스트 에이전트가 초기화되지 않았습니다.")
-        processed, skipped = agent.scan_now()
-        return {
-            "message": "스캔 완료",
-            "processed_count": processed,
-            "skipped_count": skipped
-        }
+        """환경(로컬 Source 폴더 / 클라우드 Google Drive 원격 스토리지)에 따라 적절한 동기화를 수행한다."""
+        # 1. 로컬 모드: 인제스트 에이전트가 존재하면 Source 폴더 수동 스캔
+        if agent is not None:
+            processed, skipped = agent.scan_now()
+            return {
+                "success": True,
+                "message": f"Source 스캔 완료: 신규 {processed}건 변환, {skipped}건 중복 제외",
+                "processed_count": processed,
+                "skipped_count": skipped,
+                "storage_mode": "local",
+            }
+
+        # 2. 클라우드 모드: Google Drive 스토리지 모드이거나 스토리지 설정이 유효한 경우 원격 번들 및 보고서 동기화
+        if gdrive_storage is not None and (settings.storage_mode == "gdrive" or gdrive_storage.is_configured):
+            sync_res = gdrive_storage.bootstrap_from_remote(settings.wiki_db_dir)
+            heal_res = manifest_mgr.reconcile_with_disk(settings.docs_dir, settings.assets_dir)
+            docs = manifest_mgr.get_all_documents()
+            pulled_r = sync_res.get("pulled_reports", 0)
+            docs_c = sync_res.get("docs_count", len(docs))
+            return {
+                "success": True,
+                "message": f"Google Drive 동기화 완료: 지식 DB {len(docs)}건 문서 최신화 (신규 보고서 {pulled_r}건 반영)",
+                "processed_count": docs_c,
+                "skipped_count": 0,
+                "pulled_reports": pulled_r,
+                "storage_mode": "gdrive",
+                "sync": sync_res,
+                "reconcile": heal_res,
+            }
+
+        raise HTTPException(
+            status_code=500,
+            detail="동기화 가능한 로컬 인제스트 에이전트 또는 Google Drive 스토리지가 설정되지 않았습니다."
+        )
 
     @app.post("/api/upload")
     async def upload_file(file: UploadFile = File(...)):
